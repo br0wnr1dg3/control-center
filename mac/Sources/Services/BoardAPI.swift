@@ -70,7 +70,7 @@ struct BoardAPI {
     }
 
     func fetchRepos() async throws -> [LocalRepo] {
-        try await get("repos?select=id,team_id,name,path,github_url,description,aliases&order=name")
+        try await get("repos?select=id,team_id,name,path,github_url,description,aliases,base_branch&order=name")
     }
 
     func updateRepo(_ id: Int, _ fields: [String: Any]) async throws {

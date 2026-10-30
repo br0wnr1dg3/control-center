@@ -334,6 +334,13 @@ final class BoardStore {
         }
     }
 
+    func setBaseBranch(_ repo: LocalRepo, _ branch: String?) {
+        if let i = localRepos.firstIndex(where: { $0.id == repo.id }) { localRepos[i].baseBranch = branch }
+        Task {
+            do { try await client().updateRepo(repo.id, ["base_branch": branch ?? NSNull()]) } catch { lastError = error.localizedDescription }
+        }
+    }
+
     func setAliases(_ repo: LocalRepo, _ aliases: [String]) {
         if let i = localRepos.firstIndex(where: { $0.id == repo.id }) { localRepos[i].aliases = aliases }
         Task {

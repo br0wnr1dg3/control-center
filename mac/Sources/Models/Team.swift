@@ -17,10 +17,12 @@ struct Team: Codable, Identifiable, Equatable, Hashable {
     var repos: [Repo]
     var workdir: String?
     var github: String?
+    var baseBranch: String?  // default branch agent work starts from; per-repo settings override it
     var sortOrder: Double
 
     enum CodingKeys: String, CodingKey {
         case id, key, name, kind, color, context, repos, workdir, github
+        case baseBranch = "base_branch"
         case sortOrder = "sort_order"
     }
 
@@ -66,10 +68,12 @@ struct LocalRepo: Codable, Identifiable, Equatable {
     var githubUrl: String?
     var description: String?
     var aliases: [String]
+    var baseBranch: String?
 
     enum CodingKeys: String, CodingKey {
         case id, name, path, description, aliases
         case teamId = "team_id"
         case githubUrl = "github_url"
+        case baseBranch = "base_branch"
     }
 }

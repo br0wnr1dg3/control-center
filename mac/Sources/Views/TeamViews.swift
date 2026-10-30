@@ -110,6 +110,7 @@ struct TeamSettingsView: View {
     @State private var name = ""
     @State private var workdir = ""
     @State private var github = ""
+    @State private var baseBranch = ""
     @State private var newProject = ""
 
     private var projects: [ProjectSpec] { store.projectSpecs.filter { $0.teamId == team.id } }
@@ -141,6 +142,16 @@ struct TeamSettingsView: View {
                         store.updateTeam(team, ["repos": repos.map(\.json)]) { $0.repos = repos }
                     }
                 }
+                group("Base branch", note: "Agent worktrees start from the latest origin/<branch> and PRs target it. Leave empty to use each repo's GitHub default; set a repo's own below to override.") {
+                    TextField("GitHub default", text: $baseBranch)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                        .onSubmit {
+                            let value = baseBranch.trimmingCharacters(in: .whitespaces)
+                            guard value != (team.baseBranch ?? "") else { return }
+                            store.updateTeam(team, ["base_branch": value.isEmpty ? NSNull() : value]) { $0.baseBranch = value.isEmpty ? nil : value }
+                        }
+                }
                 foundRepos
                 group("Working folder", note: "Where this team's files live on this Mac.") {
                     HStack {
@@ -168,6 +179,7 @@ struct TeamSettingsView: View {
         name = team.name
         workdir = team.workdir ?? ""
         github = team.github ?? ""
+        baseBranch = team.baseBranch ?? ""
     }
 
     private var header: some View {
@@ -351,6 +363,7 @@ struct LocalRepoRow: View {
     let repo: LocalRepo
     var store = BoardStore.shared
     @State private var aliases = ""
+    @State private var branch = ""
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -366,6 +379,16 @@ struct LocalRepoRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            TextField("Base branch", text: $branch)
+                .textFieldStyle(.roundedBorder)
+                .font(.callout)
+                .frame(width: 110)
+                .help("Overrides the team's base branch for this repo")
+                .onSubmit {
+                    let value = branch.trimmingCharacters(in: .whitespaces)
+                    let next: String? = value.isEmpty ? nil : value
+                    if next != repo.baseBranch { store.setBaseBranch(repo, next) }
+                }
             TextField("Nicknames, comma separated", text: $aliases)
                 .textFieldStyle(.roundedBorder)
                 .font(.callout)
@@ -373,7 +396,10 @@ struct LocalRepoRow: View {
                 .onSubmit(save)
         }
         .padding(.vertical, 6)
-        .onAppear { aliases = repo.aliases.joined(separator: ", ") }
+        .onAppear {
+            aliases = repo.aliases.joined(separator: ", ")
+            branch = repo.baseBranch ?? ""
+        }
     }
 
     private func save() {

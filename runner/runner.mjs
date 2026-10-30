@@ -10,7 +10,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { mkdir, writeFile, chmod } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -169,6 +169,36 @@ export function workRepo(task, team, project, synced = []) {
 
 const worktreeName = (task) => `cc-${task.id}`;
 
+// The branch work starts from and PRs target: the repo's setting, else the team default, if it exists
+// on GitHub; otherwise the repo's GitHub default branch.
+export async function baseBranch(repoPath, preferred) {
+  for (const branch of preferred.filter(Boolean)) {
+    if ((await tryGit(repoPath, "ls-remote", "--exit-code", "--heads", "origin", branch)) !== null) return branch;
+  }
+  const head = await tryGit(repoPath, "ls-remote", "--symref", "origin", "HEAD");
+  return head?.match(/ref: refs\/heads\/(\S+)\s+HEAD/)?.[1] ?? (await git(repoPath, "rev-parse", "--abbrev-ref", "HEAD"));
+}
+
+// A worktree for this task from the latest origin/<base>. The main checkout is never switched or
+// pulled, so whatever Chris (or another session) has open there is untouched.
+export async function createWorktree(repo, task, base) {
+  const path = join(repo.path, ".claude", "worktrees", worktreeName(task));
+  const branch = `worktree-${worktreeName(task)}`;
+  await git(repo.path, "fetch", "--quiet", "origin", base);
+  // Keep nested worktrees out of the main checkout's git status.
+  const exclude = join(repo.path, ".git", "info", "exclude");
+  try {
+    if (statSync(join(repo.path, ".git")).isDirectory() && !readFileSync(exclude, "utf8").includes(".claude/worktrees")) {
+      appendFileSync(exclude, "\n.claude/worktrees/\n");
+    }
+  } catch {}
+  const exists = await tryGit(repo.path, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`);
+  if (exists) await git(repo.path, "worktree", "add", path, branch);
+  // --no-track: the branch pushes to its own name, not to the base it started from.
+  else await git(repo.path, "worktree", "add", "--no-track", "-b", branch, path, `origin/${base}`);
+  return path;
+}
+
 const formatRepos = (repos) =>
   repos.map((r) => `- ${r.name}${r.url ? ` (${r.url})` : ""}${r.path ? ` checked out at ${r.path}` : ""}`).join("\n");
 
@@ -199,14 +229,14 @@ function taskPrompt(task, sessionId, dir, comments, activity, team, project, rep
 How to work:
 - Your session id is ${sessionId}. ${
       repo
-        ? `You are in your own git worktree of ${repo.name} (branch worktree-${worktreeName(task)}); other sessions use other worktrees, so stay in it. Save notes and drafts that aren't code in ${dir}.`
+        ? `You are in your own git worktree of ${repo.name}, on branch worktree-${worktreeName(task)}, started from the latest origin/${repo.base}; other sessions use other worktrees, so stay in it. Save notes and drafts that aren't code in ${dir}.`
         : folder
           ? `You are in ${team.name}'s working folder ${folder.path}${folder.repos.length ? `, which holds these repos:\n${folder.repos.map((r) => `  - ${r.name}${r.description ? `: ${r.description}` : ""}`).join("\n")}\n` : ""}. Save notes and drafts in ${dir}. If you change code in a repo, don't edit its main checkout (other work may be using it): make a worktree with \`git -C <repo> worktree add .claude/worktrees/${worktreeName(task)} -b worktree-${worktreeName(task)}\`, work there, and record it with update_task(id=${id}, worktree="<full path>") so the runner can clean it up. If it's clear which repo this task is about, also set update_task(id=${id}, repo="<name>") so future sessions start in it.`
           : `Your working directory is ${dir}; save drafts and outputs here.`
     } Attach important outputs with update_task(id=${id}, add_links=[{title, url: "file://..."}]).${
       repo
         ? `
-- Code changes: commit to this branch, push it, open a PR with gh, attach the PR with add_links, then hand review to Chris with add_human_task(parent_id=${id}, title="Review and merge PR #<n>: ..."). Never merge it yourself unless Chris explicitly asks you to in this task. The runner removes this worktree once the PR is merged.`
+- Code changes: commit to this branch, push it with \`git push -u origin HEAD\`, open a PR against ${repo.base} (\`gh pr create --base ${repo.base}\`), attach the PR with add_links, then hand review to Chris with add_human_task(parent_id=${id}, title="Review and merge PR #<n>: ..."). Never merge it yourself unless Chris explicitly asks you to in this task. The runner removes this worktree once the PR is merged.`
         : ""
     }
 - Use the control-center MCP tools. Write comments and hand-off instructions in Markdown. Log progress with update_task(id=${id}, log=...). Post anything Chris should read (a draft, a finding, a decision you made) with add_comment(id=${id}, body, author="agent"); it lands in his inbox.
@@ -225,24 +255,34 @@ async function launch(task, { resume = false } = {}) {
   await mkdir(dir, { recursive: true });
 
   const [[team], [project]] = await Promise.all([
-    task.team_id ? db(`teams?id=eq.${task.team_id}&select=name,context,repos,workdir,github`) : [],
+    task.team_id ? db(`teams?id=eq.${task.team_id}&select=name,context,repos,workdir,github,base_branch`) : [],
     task.project ? db(`projects?name=ilike.${encodeURIComponent(task.project)}&select=name,description,repos`) : [],
   ]);
-  const synced = task.team_id ? await db(`repos?team_id=eq.${task.team_id}&select=name,path,description,aliases&order=name`) : [];
-  const repo = workRepo(task, team, project, synced);
+  const synced = task.team_id
+    ? await db(`repos?team_id=eq.${task.team_id}&select=name,path,description,aliases,base_branch&order=name`)
+    : [];
+  let repo = workRepo(task, team, project, synced);
   if (repo && !task.repo) await patchTask(task.id, { repo: repo.name }); // show the match on the board
+  // An existing worktree (resume, or a relaunch) is entered directly; otherwise one is made from the
+  // freshly fetched base branch.
+  const existing = task.worktree && existsSync(task.worktree) ? task.worktree : null;
+  let worktree = existing;
+  if (!existing && repo) {
+    const setting = synced.find((r) => expandHome(r.path) === repo.path)?.base_branch;
+    try {
+      repo = { ...repo, base: await baseBranch(repo.path, [setting, team?.base_branch]) };
+      worktree = await createWorktree(repo, task, repo.base);
+    } catch (err) {
+      log(`CC-${task.id}: couldn't make a worktree in ${repo.path}: ${err.message}`);
+      await addEvent(task.id, "note", `runner couldn't create a worktree in ${repo.name}; started in the team folder instead`);
+      repo = null;
+    }
+  }
   // No clear repo: start in the team's folder (still loads its context) rather than the task folder.
   const teamDir = team?.workdir && existsSync(expandHome(team.workdir)) ? expandHome(team.workdir) : null;
   const folder = !repo && teamDir ? { path: teamDir, repos: synced.length ? synced : discoverRepos(team) } : null;
-  // An existing worktree (resume, or a relaunch) is entered directly; otherwise Claude creates one.
-  const existing = task.worktree && existsSync(task.worktree) ? task.worktree : null;
-  let cwd = existing ?? repo?.path ?? teamDir ?? dir;
-  let worktree = existing;
-  let worktreeArgs = "";
-  if (!existing && repo) {
-    worktree = join(repo.path, ".claude", "worktrees", worktreeName(task));
-    worktreeArgs = ` --worktree ${worktreeName(task)}`;
-  }
+  let cwd = worktree ?? teamDir ?? dir;
+  const worktreeArgs = "";
 
   let sessionId = task.session_id;
   let claudeArgs;
@@ -251,7 +291,6 @@ async function launch(task, { resume = false } = {}) {
     await writeFile(join(dir, "prompt.md"), pending.length ? formatComments(pending) : "Continue the task from where you left off.");
     await markDelivered(pending);
     claudeArgs = `--resume ${sessionId}`;
-    worktreeArgs = "";
     cwd = existing ?? teamDir ?? dir;
   } else {
     sessionId = randomUUID();
@@ -336,7 +375,9 @@ export async function cleanupWorktree(task) {
   if (await git(wt, "status", "--porcelain")) return keep("uncommitted changes");
   const branch = await git(wt, "rev-parse", "--abbrev-ref", "HEAD");
   await tryGit(repo, "fetch", "--quiet", "origin");
-  const base = (await tryGit(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")) ?? (await git(repo, "rev-parse", "--abbrev-ref", "HEAD"));
+  const [row] = await db(`repos?path=eq.${encodeURIComponent(repo.replace(homedir(), "~"))}&select=base_branch,team_id`);
+  const [team] = row ? await db(`teams?id=eq.${row.team_id}&select=base_branch`) : [];
+  const base = `origin/${await baseBranch(repo, [row?.base_branch, team?.base_branch])}`;
   const ahead = Number(await git(repo, "rev-list", "--count", `${base}..${branch}`));
 
   if (ahead > 0) {

@@ -531,7 +531,7 @@ export function buildServer(env: Env) {
       }
       const { data, error } = await db
         .from("teams")
-        .select("key,name,kind,color,github,context,repos,workdir,projects(name,description,repos),local_repos:repos(name,github_url,description,aliases)")
+        .select("key,name,kind,color,github,base_branch,context,repos,workdir,projects(name,description,repos),local_repos:repos(name,github_url,description,aliases,base_branch)")
         .eq("id", id)
         .single();
       return error ? fail(error.message) : ok(data);
