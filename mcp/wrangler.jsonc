@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "control-center-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "kv_namespaces": [
+    // Create with: npx wrangler kv namespace create OAUTH_KV — then paste the id here.
+    { "binding": "OAUTH_KV", "id": "d2ed4d059c524cae87b1968487081519" }
+  ],
+  "vars": {
+    "TIMEZONE": "America/Los_Angeles",
+    "PUBLIC_URL": "https://control-center-mcp.chrisbrownridge.workers.dev"
+    // Email capture (src/email.ts) is configured with secrets: AGENTMAIL_INBOX, ALLOWED_SENDERS
+    // (comma-separated), AGENTMAIL_API_KEY, AGENTMAIL_WEBHOOK_SECRET, ANTHROPIC_API_KEY (optional).
+  },
+  // Secrets (npx wrangler secret put <NAME>): SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OWNER_PASSPHRASE
+  "observability": { "enabled": true }
+}

@@ -1,0 +1,11 @@
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
+OWNER_PASSPHRASE=<long random passphrase>
+PUBLIC_URL=http://localhost:8787
+
+# Email capture (optional)
+AGENTMAIL_INBOX=you@agentmail.to
+ALLOWED_SENDERS=you@example.com
+AGENTMAIL_API_KEY=
+AGENTMAIL_WEBHOOK_SECRET=
+ANTHROPIC_API_KEY=
