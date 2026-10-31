@@ -5,6 +5,10 @@
 //                                        in-progress task moves to needs_you with what it said last.
 //   session-state.mjs resumed <taskId>   UserPromptSubmit: someone typed into the session, so a
 //                                        needs_you task goes back to in_progress.
+//   session-state.mjs ask <taskId>       PreToolUse on AskUserQuestion: Claude's multiple-choice picker
+//                                        only works in the terminal, so the question and its options go
+//                                        to the board instead and the picker is blocked (exit 2); the
+//                                        answer comes back into the session as a typed message.
 //
 // Only ever moves in_progress <-> needs_you, so finished tasks and questions filed through ask_human
 // are left alone. Never blocks the session: every failure exits 0.
@@ -24,9 +28,11 @@ function serviceKey() {
   );
 }
 
+const OWNER = process.env.CC_OWNER_NAME || "the owner";
+
 async function patch(fromStatus, fields) {
   const key = serviceKey();
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/tasks?id=eq.${taskId}&status=eq.${fromStatus}`, {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/tasks?id=eq.${taskId}&status=in.(${fromStatus})`, {
     method: "PATCH",
     headers: { apikey: key, Authorization: `Bearer ${key}`, "Content-Type": "application/json", Prefer: "return=minimal" },
     body: JSON.stringify(fields),
@@ -51,7 +57,12 @@ function lastAssistantText(input) {
   return "";
 }
 
-const excerpt = (text, max = 600) => (text.length > max ? `…${text.slice(-max)}` : text).trim();
+// The agent's last words, kept whole unless very long; then the end, starting at a line break.
+function excerpt(text, max = 6000) {
+  if (text.length <= max) return text.trim();
+  const tail = text.slice(-max);
+  return `…${tail.slice(tail.indexOf("\n") + 1)}`.trim();
+}
 
 try {
   const input = JSON.parse(readFileSync(0, "utf8") || "{}");
@@ -65,6 +76,26 @@ try {
     });
   } else if (mode === "resumed") {
     await patch("needs_you", { status: "in_progress", question: null });
+  } else if (mode === "ask") {
+    const questions = input.tool_input?.questions ?? [];
+    if (!questions.length) process.exit(0);
+    const said = excerpt(lastAssistantText(input));
+    const asked = questions.map((q) => `**${q.question}**`).join("\n\n");
+    await patch("in_progress,needs_you", {
+      status: "needs_you",
+      question: [said, asked].filter(Boolean).join("\n\n"),
+      question_options: questions.map((q) => ({
+        question: q.question,
+        header: q.header ?? null,
+        multiSelect: Boolean(q.multiSelect),
+        options: (q.options ?? []).map((o) => ({ label: o.label, description: o.description ?? null })),
+      })),
+    });
+    console.error(
+      `Sent this question and its options to ${OWNER} on the Control Center board instead of the picker. ` +
+        `Stop here and wait: the answer will be typed into this session as "${OWNER} on the board: ...".`,
+    );
+    process.exit(2); // blocks the picker; Claude reads the message above
   }
 } catch (err) {
   console.error(`control-center hook: ${err.message}`);

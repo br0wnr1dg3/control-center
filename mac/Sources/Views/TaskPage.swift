@@ -11,9 +11,11 @@ struct TaskPage: View {
     @State private var comment = ""
     @State private var newSubtask = ""
     @FocusState private var editingTitle: Bool
+    @State private var scroller: ScrollViewProxy?
 
     var body: some View {
         HStack(spacing: 0) {
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     breadcrumb
@@ -25,19 +27,35 @@ struct TaskPage: View {
                         .onChange(of: editingTitle) { _, focused in if !focused { saveTitle() } }
 
                     if embedded { CompactProperties(task: task) }
-                    if task.status == .needs_you { NeedsYouCard(task: task) }
+                    if task.status == .needs_you {
+                        Button { withAnimation { scroller?.scrollTo("reply", anchor: .bottom) } } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "questionmark.bubble.fill").foregroundStyle(.orange)
+                                Text("Waiting on you").fontWeight(.medium)
+                                Text("Reply below").foregroundStyle(.secondary)
+                                Image(systemName: "arrow.down").font(.caption).foregroundStyle(.secondary)
+                            }
+                            .font(.callout)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Color.orange.opacity(0.12), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
 
                     descriptionEditor
                     subtasks
                     links
                     Divider()
                     timeline
-                    composer
+                    if task.status == .needs_you { ReplyCard(task: task).id("reply") } else { composer }
                 }
                 .padding(.horizontal, embedded ? 28 : 40)
                 .padding(.vertical, embedded ? 20 : 28)
                 .frame(maxWidth: 820, alignment: .leading)
                 .frame(maxWidth: .infinity)
+            }
+            .onAppear { scroller = proxy }
             }
 
             // In the Inbox the properties sit in a strip under the title, leaving room to read.
@@ -238,6 +256,124 @@ struct TaskPage: View {
     private func sendComment() {
         store.comment(on: task, comment)
         comment = ""
+    }
+}
+
+/// The agent's open question at the foot of the task, like the last comment in a thread: the full
+/// message, its choices as buttons, and a roomy box to reply in.
+struct ReplyCard: View {
+    let task: BoardTask
+    var store = BoardStore.shared
+    @State private var picked: [Int: Set<String>] = [:]
+    @State private var text = ""
+
+    private var questions: [AgentQuestion] { task.questionOptions ?? [] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles").foregroundStyle(.purple)
+                Text("Agent").font(.callout.weight(.semibold))
+                Text("is waiting on you").font(.callout).foregroundStyle(.secondary)
+                Spacer()
+                if Cmux.isInstalled && task.sessionId != nil {
+                    Button { Cmux.openSession(taskId: task.id) } label: { Label("Open session", systemImage: "terminal") }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                }
+            }
+            MarkdownView(text: task.question ?? "Waiting on you.", size: 14, selectable: true)
+
+            ForEach(Array(questions.enumerated()), id: \.offset) { index, q in
+                VStack(alignment: .leading, spacing: 8) {
+                    if questions.count > 1 || q.header != nil {
+                        Text(q.header ?? q.question).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    }
+                    ForEach(q.options, id: \.self) { option in
+                        choice(option, selected: picked[index, default: []].contains(option.label)) {
+                            var set = picked[index, default: []]
+                            if set.contains(option.label) { set.remove(option.label) }
+                            else { if !q.multiSelect { set.removeAll() }; set.insert(option.label) }
+                            picked[index] = set
+                        }
+                    }
+                }
+            }
+
+            ZStack(alignment: .topLeading) {
+                if text.isEmpty {
+                    Text(questions.isEmpty ? "Reply to the agent…" : "Add detail, or answer something else…")
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 5)
+                        .padding(.top, 1)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: $text)
+                    .font(.system(size: 14))
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 90)
+            }
+            .padding(10)
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.35)))
+
+            HStack {
+                Text("⌘↩ sends · goes straight into the agent's session").font(.caption).foregroundStyle(.tertiary)
+                Spacer()
+                Button("Send reply", action: send)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(answer.isEmpty)
+            }
+        }
+        .padding(16)
+        .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.4)))
+        .onChange(of: task.id) { _, _ in picked = [:]; text = "" }
+    }
+
+    private func choice(_ option: AgentQuestion.Option, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.label).fontWeight(.medium)
+                    if let description = option.description, !description.isEmpty {
+                        Text(description).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? Color.accentColor.opacity(0.6) : Color.secondary.opacity(0.15)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Picked options (per question when there are several) plus anything typed.
+    private var answer: String {
+        var parts: [String] = []
+        for (index, q) in questions.enumerated() {
+            let chosen = q.options.map(\.label).filter { picked[index, default: []].contains($0) }
+            guard !chosen.isEmpty else { continue }
+            let joined = chosen.joined(separator: ", ")
+            parts.append(questions.count > 1 ? "\(q.header ?? q.question): \(joined)" : joined)
+        }
+        let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !typed.isEmpty { parts.append(typed) }
+        return parts.joined(separator: "\n\n")
+    }
+
+    private func send() {
+        let reply = answer
+        guard !reply.isEmpty else { return }
+        store.answer(task, with: reply)
+        picked = [:]
+        text = ""
     }
 }
 

@@ -123,8 +123,8 @@ struct BoardAPI {
         _ = try await request(path, method: "PATCH", body: fields)
     }
 
-    func addComment(_ taskId: Int, body: String) async throws {
-        _ = try await request("task_comments", method: "POST", body: ["task_id": taskId, "author": "me", "body": body])
+    func addComment(_ taskId: Int, body: String, author: String = "me") async throws {
+        _ = try await request("task_comments", method: "POST", body: ["task_id": taskId, "author": author, "body": body])
     }
 
     func addEvent(_ taskId: Int, kind: String, body: String) async throws {

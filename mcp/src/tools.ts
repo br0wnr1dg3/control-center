@@ -354,15 +354,23 @@ export function buildServer(env: Env) {
     {
       description:
         `Block a task on a question for ${o}: posts it as a comment, sets needs_you and puts it in their inbox. ` +
-        "The runner resumes the session once he answers.",
+        "The runner resumes the session once they answer. For a choice, pass options: they show as buttons on the board.",
       inputSchema: z.object({
         id: taskId,
-        question: z.string().min(1),
+        question: z.string().min(1).describe("The full question with the context needed to answer it (Markdown)"),
+        options: z
+          .array(z.object({ label: z.string(), description: z.string().optional() }))
+          .optional()
+          .describe("Choices to pick from, e.g. [{label: 'Ship v1', description: 'as is'}]. They can still type something else."),
+        multi_select: z.boolean().optional().describe("Allow picking several options"),
         session_id: z.string().optional().describe("Claude session id so the runner can resume"),
       }),
     },
-    async ({ id, question, session_id }) => {
+    async ({ id, question, options, multi_select, session_id }) => {
       const patch: Record<string, unknown> = { status: "needs_you", question };
+      patch.question_options = options?.length
+        ? [{ question, header: null, multiSelect: Boolean(multi_select), options: options.map((o) => ({ label: o.label, description: o.description ?? null })) }]
+        : null;
       if (session_id) patch.session_id = session_id;
       // Status first so the inbox gets one "question" entry; the comment trigger skips the duplicate.
       const { data, error } = await db.from("tasks").update(patch).eq("id", id).select().single();

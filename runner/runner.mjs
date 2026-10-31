@@ -39,7 +39,14 @@ const HOOK = join(dirname(fileURLToPath(import.meta.url)), "hooks", "session-sta
 // as needs_you in the inbox however the agent asked, and typing into it moves the task back.
 function sessionSettings(taskId) {
   const hook = (mode) => [{ hooks: [{ type: "command", command: `node ${JSON.stringify(HOOK)} ${mode} ${taskId}`, timeout: 30 }] }];
-  return { hooks: { Stop: hook("waiting"), Notification: hook("waiting"), UserPromptSubmit: hook("resumed") } };
+  return {
+    hooks: {
+      Stop: hook("waiting"),
+      Notification: hook("waiting"),
+      UserPromptSubmit: hook("resumed"),
+      PreToolUse: [{ matcher: "AskUserQuestion", hooks: hook("ask")[0].hooks }],
+    },
+  };
 }
 
 const log = (...args) => console.log(new Date().toISOString(), ...args);
@@ -248,7 +255,7 @@ How to work:
         : ""
     }
 - Use the control-center MCP tools. Write comments and hand-off instructions in Markdown. Log progress with update_task(id=${id}, log=...). Post anything ${OWNER} should read (a draft, a finding, a decision you made) with add_comment(id=${id}, body, author="agent"); it lands in his inbox.
-- If you need a decision or information from ${OWNER}: call ask_human(id=${id}, question, session_id="${sessionId}"), then ask the same question here and wait. He may answer here, or on the board, in which case it's typed in here as "${OWNER} on the board: ...". Once answered, call update_task(id=${id}, status="in_progress").
+- If you need a decision or information from ${OWNER}: call ask_human(id=${id}, question, session_id="${sessionId}"), with options=[{label, description}] when it's a choice, then ask the same question here and wait. Don't use the AskUserQuestion picker: ${OWNER} usually answers from the board, where it doesn't show. He may answer here, or on the board, in which case it's typed in here as "${OWNER} on the board: ...". Once answered, call update_task(id=${id}, status="in_progress").
 - ${OWNER} may also comment while you work; those arrive here the same way. Treat them as instructions. If this task was handed to you with an @agent comment, that latest comment is your brief: do what it asks, using the description and history for context.
 - Anything only a human can or should do (posting publicly, sending messages or email as ${OWNER}, payments, calls, logging into accounts, physical errands): prepare everything, then call add_human_task(parent_id=${id}, ...) with exact instructions and any drafts. Do not do those yourself unless the description explicitly says to.
 - If you've done your part but the rest of this task is ${OWNER}'s (decisions, posting, steps they have to do), hand it back instead of completing it: update_task(id=${id}, kind="human", status="ready", log="<what you did; what's left for ${OWNER}>"). For a separate human step on a task you are finishing, use add_human_task. Never set status "new".
@@ -323,6 +330,7 @@ async function launch(task, { resume = false } = {}) {
     `#!/bin/zsh -l
 cd ${JSON.stringify(cwd)}
 export CC_TASK_ID=${task.id}
+export CC_OWNER_NAME=${JSON.stringify(OWNER)}
 export PATH=${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), "bin"))}:$PATH
 exec claude "$(cat ${JSON.stringify(join(dir, "prompt.md"))})" ${claudeArgs}${worktreeArgs} --name ${JSON.stringify(workspaceTitle(task))} \\
   --remote-control ${JSON.stringify(workspaceTitle(task))} --settings ${JSON.stringify(settings)} \\

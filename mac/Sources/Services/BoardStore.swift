@@ -264,7 +264,13 @@ final class BoardStore {
     func answer(_ task: BoardTask, with text: String) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        mutate(task.id, local: { $0.status = .ready; $0.question = nil }) { api in
+        // Keep the question in the history: questions caught from a session aren't comments yet.
+        let question = task.question?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let alreadyPosted = selectedTaskId == task.id && comments.contains { $0.author == "agent" && $0.body == question }
+        mutate(task.id, local: { $0.status = .ready; $0.question = nil; $0.questionOptions = nil }) { api in
+            if let question, !question.isEmpty, !alreadyPosted {
+                try await api.addComment(task.id, body: question, author: "agent")
+            }
             try await api.addComment(task.id, body: text)
             try await api.update(task.id, ["status": "ready", "question": NSNull()], onlyIfStatus: .needs_you)
         }

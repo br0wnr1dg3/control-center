@@ -67,6 +67,19 @@ enum Priority: Int, CaseIterable {
     var rank: Int { self == .none ? 5 : rawValue }
 }
 
+/// A question an agent is waiting on, with its choices (from ask_human, or Claude's picker in a session).
+struct AgentQuestion: Codable, Equatable {
+    struct Option: Codable, Equatable, Hashable {
+        var label: String
+        var description: String?
+    }
+
+    var question: String
+    var header: String?
+    var multiSelect: Bool
+    var options: [Option]
+}
+
 struct TaskLink: Codable, Equatable, Hashable {
     var title: String
     var url: String
@@ -90,6 +103,7 @@ struct BoardTask: Codable, Identifiable, Equatable {
     var parentId: Int?
     var source: String?
     var question: String?
+    var questionOptions: [AgentQuestion]?
     var sessionId: String?
     var worktree: String?  // agent's git worktree, until the runner removes it
     var repo: String?      // repo the agent session starts in; empty = runner decides
@@ -102,6 +116,7 @@ struct BoardTask: Codable, Identifiable, Equatable {
         case sortOrder = "sort_order"
         case parentId = "parent_id"
         case sessionId = "session_id"
+        case questionOptions = "question_options"
         case completedAt = "completed_at"
     }
 
