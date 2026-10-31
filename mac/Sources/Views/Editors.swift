@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// Rendered Markdown that turns into a plain-text editor on the pencil button or a double-click.
+/// Rendered, selectable Markdown with a copy button; the pencil turns it into a plain-text editor.
 struct MarkdownEditor: View {
     let value: String?
     var placeholder = "Add a description…"
@@ -11,6 +11,7 @@ struct MarkdownEditor: View {
     @State private var draft = ""
     @State private var editing = false
     @State private var hovering = false
+    @State private var copied = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -41,20 +42,30 @@ struct MarkdownEditor: View {
                 }
                 .buttonStyle(.plain)
             } else {
-                MarkdownView(text: value ?? "")
-                    .padding(.trailing, 28)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2, perform: start)
+                // Selectable like any text; editing is the pencil, copying everything is the clipboard.
+                MarkdownView(text: value ?? "", selectable: true)
+                    .padding(.trailing, 52)
                     .overlay(alignment: .topTrailing) {
-                        Button(action: start) { Image(systemName: "pencil") }
-                            .buttonStyle(.borderless)
-                            .help("Edit (or double-click)")
-                            .opacity(hovering ? 1 : 0.35)
+                        HStack(spacing: 6) {
+                            Button(action: copyAll) { Image(systemName: copied ? "checkmark" : "doc.on.doc") }
+                                .help("Copy all (as Markdown)")
+                            Button(action: start) { Image(systemName: "pencil") }
+                                .help("Edit")
+                        }
+                        .buttonStyle(.borderless)
+                        .opacity(hovering ? 1 : 0.35)
                     }
                     .onHover { hovering = $0 }
             }
         }
         .onChange(of: value) { _, new in if !editing { draft = new ?? "" } }
+    }
+
+    private func copyAll() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value ?? "", forType: .string)
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
     }
 
     private func start() {
