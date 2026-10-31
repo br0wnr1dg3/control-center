@@ -138,8 +138,8 @@ async function processEmail(env: EmailEnv, message: ReceivedMessage) {
 
   const [teams, projects, repos] = await Promise.all([
     db.from("teams").select("id,key,name,kind").order("sort_order"),
-    db.from("projects").select("name,team_id").order("name"),
-    db.from("repos").select("name,team_id,description,aliases").order("name"),
+    db.from("projects").select("name,team_id,description").order("name"),
+    db.from("repos").select("name,team_id,description,aliases").eq("hidden", false).order("name"),
   ]);
   const teamList = teams.data ?? [];
 
@@ -266,7 +266,7 @@ Return one ticket per distinct thing Chris needs to get done (usually exactly on
 - description (Markdown): what and why in 1-2 lines; the context someone starting cold needs (who, links, numbers, deadlines, quoted from the email where useful); then a "Done when" checklist (- [ ] ...). Don't paste the whole email.
 - kind: "agent" only if Claude could finish it alone with a computer (research, drafting, analysis, code). Replying or sending as Chris, calls, payments, posting publicly and errands are "human".
 - team: the key of the team the email is about, from the list below, or null if unclear. Use the sender's and recipients' domains, company names and the subject as clues.
-- project: an existing project name from the list if one clearly fits, else null. Don't invent projects.
+- project: an existing project name from the list if one clearly fits (use the descriptions: e.g. making or editing an ad or video belongs in the video project), else null. Don't invent projects.
 - labels: 0-3 lowercase tags for cross-cutting themes, or none.
 - priority: 0 unless the email makes urgency clear (1 urgent, 2 high, 3 medium, 4 low).
 - scheduled_on / due: YYYY-MM-DD only if the email or Chris's note gives a date to do it / a real deadline; else null.
@@ -283,7 +283,7 @@ async function triage(
     runNow: boolean;
     from: string;
     teams: { key: string; name: string; kind: string; id: number }[];
-    projects: { name: string; team_id: number | null }[];
+    projects: { name: string; team_id: number | null; description: string | null }[];
     repos: { name: string; team_id: number; description: string | null; aliases: string[] }[];
   },
 ): Promise<Draft[]> {
@@ -291,7 +291,9 @@ async function triage(
   const today = new Date().toLocaleDateString("en-CA", { timeZone: env.TIMEZONE });
   const teamLines = input.teams
     .map((t) => {
-      const names = input.projects.filter((p) => p.team_id === t.id).map((p) => p.name);
+      const names = input.projects
+        .filter((p) => p.team_id === t.id)
+        .map((p) => (p.description ? `${p.name} (${p.description.replace(/\s+/g, " ").slice(0, 160)})` : p.name));
       const repos = input.repos
         .filter((r) => r.team_id === t.id)
         .map((r) => `    - ${r.name}${r.aliases.length ? ` (aka ${r.aliases.join(", ")})` : ""}${r.description ? `: ${r.description}` : ""}`);

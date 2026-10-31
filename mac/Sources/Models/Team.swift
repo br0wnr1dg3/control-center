@@ -69,9 +69,10 @@ struct LocalRepo: Codable, Identifiable, Equatable {
     var description: String?
     var aliases: [String]
     var baseBranch: String?
+    var hidden: Bool
 
     enum CodingKeys: String, CodingKey {
-        case id, name, path, description, aliases
+        case id, name, path, description, aliases, hidden
         case teamId = "team_id"
         case githubUrl = "github_url"
         case baseBranch = "base_branch"

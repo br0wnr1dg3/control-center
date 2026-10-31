@@ -341,6 +341,13 @@ final class BoardStore {
         }
     }
 
+    func setHidden(_ repo: LocalRepo, _ hidden: Bool) {
+        if let i = localRepos.firstIndex(where: { $0.id == repo.id }) { localRepos[i].hidden = hidden }
+        Task {
+            do { try await client().updateRepo(repo.id, ["hidden": hidden]) } catch { lastError = error.localizedDescription }
+        }
+    }
+
     func setAliases(_ repo: LocalRepo, _ aliases: [String]) {
         if let i = localRepos.firstIndex(where: { $0.id == repo.id }) { localRepos[i].aliases = aliases }
         Task {

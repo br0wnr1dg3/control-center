@@ -370,6 +370,7 @@ struct LocalRepoRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(repo.name).fontWeight(.medium)
+                    if repo.hidden { Text("hidden").font(.caption).foregroundStyle(.tertiary) }
                     if let url = repo.githubUrl.flatMap(URL.init(string:)) {
                         Link(destination: url) { Image(systemName: "arrow.up.right.square") }.help(url.absoluteString)
                     }
@@ -379,6 +380,12 @@ struct LocalRepoRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            Button { store.setHidden(repo, !repo.hidden) } label: {
+                Image(systemName: repo.hidden ? "eye.slash" : "eye")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .help(repo.hidden ? "Hidden: never matched or offered. Click to show." : "Hide from matching (e.g. a stale copy)")
             TextField("Base branch", text: $branch)
                 .textFieldStyle(.roundedBorder)
                 .font(.callout)
@@ -396,6 +403,7 @@ struct LocalRepoRow: View {
                 .onSubmit(save)
         }
         .padding(.vertical, 6)
+        .opacity(repo.hidden ? 0.5 : 1)
         .onAppear {
             aliases = repo.aliases.joined(separator: ", ")
             branch = repo.baseBranch ?? ""

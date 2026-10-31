@@ -533,6 +533,7 @@ export function buildServer(env: Env) {
         .from("teams")
         .select("key,name,kind,color,github,base_branch,context,repos,workdir,projects(name,description,repos),local_repos:repos(name,github_url,description,aliases,base_branch)")
         .eq("id", id)
+        .eq("local_repos.hidden", false)
         .single();
       return error ? fail(error.message) : ok(data);
     },

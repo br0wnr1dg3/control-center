@@ -392,7 +392,7 @@ struct RepoField: View {
     var store = BoardStore.shared
     @State private var text = ""
 
-    private var suggestions: [LocalRepo] { store.localRepos.filter { $0.teamId == task.teamId } }
+    private var suggestions: [LocalRepo] { store.localRepos.filter { $0.teamId == task.teamId && !$0.hidden } }
 
     var body: some View {
         HStack(spacing: 6) {

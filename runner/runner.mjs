@@ -144,10 +144,10 @@ export function workRepo(task, team, project, synced = []) {
   const configured = [...(project?.repos ?? []), ...(team?.repos ?? [])]
     .filter((r) => r.path)
     .map((r) => ({ ...r, path: expandHome(r.path) }));
-  const found = discoverRepos(team).map((d) => ({
-    ...d,
-    aliases: synced.find((r) => expandHome(r.path) === d.path)?.aliases ?? [],
-  }));
+  const hidden = new Set(synced.filter((r) => r.hidden).map((r) => expandHome(r.path)));
+  const found = discoverRepos(team)
+    .filter((d) => !hidden.has(d.path))
+    .map((d) => ({ ...d, aliases: synced.find((r) => expandHome(r.path) === d.path)?.aliases ?? [] }));
   const known = [...configured, ...found.filter((d) => !configured.some((c) => c.path === d.path))];
 
   if (task.repo) {
@@ -267,7 +267,7 @@ async function launch(task, { resume = false } = {}) {
     task.project ? db(`projects?name=ilike.${encodeURIComponent(task.project)}&select=name,description,repos`) : [],
   ]);
   const synced = task.team_id
-    ? await db(`repos?team_id=eq.${task.team_id}&select=name,path,description,aliases,base_branch&order=name`)
+    ? await db(`repos?team_id=eq.${task.team_id}&select=name,path,description,aliases,base_branch,hidden&order=name`)
     : [];
   let repo = workRepo(task, team, project, synced);
   if (repo && !task.repo) await patchTask(task.id, { repo: repo.name }); // show the match on the board
@@ -288,7 +288,8 @@ async function launch(task, { resume = false } = {}) {
   }
   // No clear repo: start in the team's folder (still loads its context) rather than the task folder.
   const teamDir = team?.workdir && existsSync(expandHome(team.workdir)) ? expandHome(team.workdir) : null;
-  const folder = !repo && teamDir ? { path: teamDir, repos: synced.length ? synced : discoverRepos(team) } : null;
+  const visible = synced.filter((r) => !r.hidden);
+  const folder = !repo && teamDir ? { path: teamDir, repos: synced.length ? visible : discoverRepos(team) } : null;
   let cwd = worktree ?? teamDir ?? dir;
   const worktreeArgs = "";
 
