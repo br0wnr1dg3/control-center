@@ -67,7 +67,7 @@ struct InboxRow: View {
                     Text("CC-\(item.task.id)").font(.caption).foregroundStyle(.tertiary)
                     Text(item.task.title).font(.callout).foregroundStyle(.secondary).lineLimit(1)
                 }
-                if item.kind == "comment" || item.kind == "question" || item.kind == "stalled" {
+                if item.kind == "comment" || item.kind == "question" || item.kind == "stalled" || (item.kind == "handoff" && item.body != item.task.title) {
                     Text(item.body)
                         .font(.callout)
                         .lineLimit(3)
