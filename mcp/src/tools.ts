@@ -63,7 +63,7 @@ async function logEvent(db: SupabaseClient, taskId: number, kind: string, body: 
 
 // Sent to every client at connect time. Claude in Slack or on the web knows nothing else about the
 // board, so this is the house style for tickets.
-const INSTRUCTIONS = `Control Center is Chris's task board for everything outside engineering (Linear covers engineering).
+const instructions = (o: string) => `Control Center is ${o}'s task board for everything outside engineering (Linear covers engineering).
 
 Referring to things
 - Tasks are CC-<id> (CC-12 is id 12); tools accept 12, "12" or "CC-12". Write "CC-12" in text and it becomes a link in the app.
@@ -74,21 +74,23 @@ Referring to things
 Writing a task
 - Title: a short imperative with the outcome, e.g. "Draft LinkedIn post on menopause study", not "LinkedIn".
 - Description (Markdown): what and why in 1-2 lines, then the context someone starting cold needs (links, file paths, names), then a "Done when" checklist (- [ ] ...). For agent tasks also list constraints and where outputs go. Keep team-wide rules in the team briefing (save_team context), not in every task.
-- kind: 'agent' only if Claude can finish it alone with a computer; posting publicly, sending messages as Chris, calls, payments, logins and errands are 'human'. Mixed work = an agent task whose agent hands the human step back with add_human_task, or separate sub-tasks.
+- kind: 'agent' only if Claude can finish it alone with a computer; posting publicly, sending messages as ${o}, calls, payments, logins and errands are 'human'. Mixed work = an agent task whose agent hands the human step back with add_human_task, or separate sub-tasks.
 - Split work longer than a session into sub-tasks (parent_id) under one parent that holds the shared brief.
-- Dates: scheduled_on = the day to do it (puts it on the calendar; agent tasks wait for it). due = a real deadline only. Use YYYY-MM-DD in Chris's timezone. today=true pins to today's list.
-- Status: new by default. Set ready=true only when Chris says to go ahead: ready agent tasks are executed by the runner without further review.
+- Dates: scheduled_on = the day to do it (puts it on the calendar; agent tasks wait for it). due = a real deadline only. Use YYYY-MM-DD in ${o}'s timezone. today=true pins to today's list.
+- Status: new by default. Set ready=true only when ${o} says to go ahead: ready agent tasks are executed by the runner without further review.
 - Priority only when stated or obvious (1 urgent ... 4 low). Labels are lowercase tags for cross-cutting themes (linkedin, research), not a substitute for project.
 - Always pass source: 'cli', 'slack', 'web:<account>' or 'app'.
 
 Comments and answers
-- Relaying Chris's own words: author='me' (a running agent receives them). Your own notes: author='claude'. Runner sessions: author='agent'.
+- Relaying ${o}'s own words: author='me' (a running agent receives them). Your own notes: author='claude'. Runner sessions: author='agent'.
 - Answer a waiting question with answer_task, which hands the task back to its agent.
-- To hand any task to an agent (e.g. "get the agent to merge CC-46"), add_comment with author='me' and a body starting "@agent " followed by Chris's instruction; it becomes a ready agent task and the runner starts it.
+- To hand any task to an agent (e.g. "get the agent to merge CC-46"), add_comment with author='me' and a body starting "@agent " followed by ${o}'s instruction; it becomes a ready agent task and the runner starts it.
 
 After creating or changing tasks, reply with each task's CC key and title.`;
 
 export function buildServer(env: Env) {
+  // Whose board this is, as the instructions name them (OWNER_NAME secret; neutral when unset).
+  const o = (env as Env & { OWNER_NAME?: string }).OWNER_NAME || "the owner";
   const timeZone = env.TIMEZONE;
   const db = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
@@ -97,7 +99,7 @@ export function buildServer(env: Env) {
   const server = new McpServer(
     { name: "control-center", version: "0.4.0" },
     {
-      instructions: INSTRUCTIONS,
+      instructions: instructions(o),
     },
   );
 
@@ -151,7 +153,7 @@ export function buildServer(env: Env) {
       description:
         "List tasks. Views: today (flagged, scheduled or due today/earlier), upcoming (calendar by scheduled_on, " +
         "optional from/to), new (untriaged), agent_ready (runner queue), " +
-        "needs_you (waiting on Chris), human (open tasks for Chris), open, done_recent. Filter by query (text search), " +
+        `needs_you (waiting on ${o}), human (open tasks for ${o}), open, done_recent. Filter by query (text search), ` +
         "team, project, label, priority. Use view='open' with query to look for an existing task before adding one.",
       inputSchema: z.object({
         view: z.enum(views).default("today"),
@@ -253,8 +255,8 @@ export function buildServer(env: Env) {
     {
       description:
         "Change fields on a task. labels replaces the whole list (use add_labels/remove_labels to edit). " +
-        "Use complete_task to finish, ask_human to block on Chris, add_comment for discussion. An agent that has done " +
-        "its part of a task whose remaining steps are Chris's hands it back with kind='human', status='ready' and a log " +
+        `Use complete_task to finish, ask_human to block on ${o}, add_comment for discussion. An agent that has done ` +
+        `its part of a task whose remaining steps are ${o}'s hands it back with kind='human', status='ready' and a log ` +
         "of what's left; never set status 'new' (that means untriaged).",
       inputSchema: z.object({
         id: taskId,
@@ -314,8 +316,8 @@ export function buildServer(env: Env) {
     "add_comment",
     {
       description:
-        "Comment on a task. author='me' when relaying Chris's words (reaches a running agent session); " +
-        "'claude' for your own notes; 'agent' from a runner session. Non-'me' comments land in Chris's inbox.",
+        `Comment on a task. author='me' when relaying ${o}'s words (reaches a running agent session); ` +
+        `'claude' for your own notes; 'agent' from a runner session. Non-'me' comments land in ${o}'s inbox.`,
       inputSchema: z.object({ id: taskId, body: z.string().min(1), author: author.default("claude") }),
     },
     async ({ id, body, author }) => {
@@ -351,7 +353,7 @@ export function buildServer(env: Env) {
     "ask_human",
     {
       description:
-        "Block a task on a question for Chris: posts it as a comment, sets needs_you and puts it in his inbox. " +
+        `Block a task on a question for ${o}: posts it as a comment, sets needs_you and puts it in their inbox. ` +
         "The runner resumes the session once he answers.",
       inputSchema: z.object({
         id: taskId,
@@ -373,7 +375,7 @@ export function buildServer(env: Env) {
   server.registerTool(
     "answer_task",
     {
-      description: "Answer the open question on a needs_you task (as Chris). Hands it back to the runner.",
+      description: `Answer the open question on a needs_you task (as ${o}). Hands it back to the runner.`,
       inputSchema: z.object({ id: taskId, answer: z.string().min(1) }),
     },
     async ({ id, answer }) => {
@@ -395,12 +397,12 @@ export function buildServer(env: Env) {
     "add_human_task",
     {
       description:
-        "Hand a step to Chris, e.g. 'Post this on LinkedIn' with the draft in instructions. " +
+        `Hand a step to ${o}, e.g. 'Post this on LinkedIn' with the draft in instructions. ` +
         "Created as a ready human sub-task on today's list and flagged in his inbox.",
       inputSchema: z.object({
         parent_id: taskId,
         title: z.string().min(1).max(500),
-        instructions: z.string().describe("Everything Chris needs: drafts, links, exact steps"),
+        instructions: z.string().describe(`Everything ${o} needs: drafts, links, exact steps`),
         priority: priority.optional(),
       }),
     },
@@ -457,7 +459,7 @@ export function buildServer(env: Env) {
     "list_inbox",
     {
       description:
-        "Chris's inbox: agent questions, comments from Claude/agents, handed-off tasks, finished agent work. Unread first.",
+        `${o}'s inbox: agent questions, comments from Claude/agents, handed-off tasks, finished agent work. Unread first.`,
       inputSchema: z.object({
         unread_only: z.boolean().default(true),
         limit: z.number().int().min(1).max(100).default(30),
@@ -518,7 +520,7 @@ export function buildServer(env: Env) {
     {
       description:
         "A team's briefing (context), GitHub org, working folder, projects with their specs, and local_repos: every repo " +
-        "checked out on Chris's Mac (name, GitHub, description, aliases). Use a local_repos name as a task's repo.",
+        `checked out on ${o}'s Mac (name, GitHub, description, aliases). Use a local_repos name as a task's repo.`,
       inputSchema: z.object({ team: teamRef }),
       annotations: { readOnlyHint: true },
     },

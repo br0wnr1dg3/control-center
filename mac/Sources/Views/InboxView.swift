@@ -33,7 +33,7 @@ struct InboxView: View {
         .navigationTitle("Inbox")
     }
 
-    /// Questions waiting on Chris and what's on his plate today, above the notification feed.
+    /// Questions waiting on the owner and what's on their plate today, above the notification feed.
     @ViewBuilder private var plate: some View {
         if !store.needsYou.isEmpty {
             VStack(alignment: .leading, spacing: 8) {

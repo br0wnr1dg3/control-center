@@ -4,3 +4,6 @@ node_modules
 .DS_Store
 supabase/.temp
 supabase/.branches
+
+# Personal setup (teams, repos, branches); see supabase/seed.example.sql
+supabase/seed.local.sql

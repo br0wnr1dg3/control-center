@@ -77,7 +77,7 @@ final class BoardStore {
 
     func done(on day: String) -> [BoardTask] { tasks.filter { $0.completedDay == day } }
 
-    /// Things on Chris's plate today: his tasks plus anything waiting on him.
+    /// Things on the owner's plate today: their tasks plus anything waiting on them.
     var onYourPlate: [BoardTask] { tasks(on: Day.today).filter { $0.kind != .agent } }
 
     var unscheduled: [BoardTask] {

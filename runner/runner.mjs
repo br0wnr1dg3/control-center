@@ -31,9 +31,11 @@ const CONFIG = {
   repoSyncMinutes: Number(process.env.CC_REPO_SYNC_MINUTES ?? 10),
 };
 const TASKS_DIR = join(CONFIG.home, "tasks");
+// Whose board this is, as agent prompts name them (CC_OWNER_NAME; neutral when unset).
+const OWNER = process.env.CC_OWNER_NAME || "the owner";
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), "hooks", "session-state.mjs");
 
-// Session hooks that keep the board in step with the terminal: a session waiting on Chris shows up
+// Session hooks that keep the board in step with the terminal: a session waiting on the owner shows up
 // as needs_you in the inbox however the agent asked, and typing into it moves the task back.
 function sessionSettings(taskId) {
   const hook = (mode) => [{ hooks: [{ type: "command", command: `node ${JSON.stringify(HOOK)} ${mode} ${taskId}`, timeout: 30 }] }];
@@ -94,8 +96,8 @@ async function typeInto(workspace, text) {
 
 const localDay = () => new Date().toLocaleDateString("en-CA");
 
-// Chris's comments the live session hasn't seen yet (answers are comments too).
-// Chris's comments and review decisions (from him or the team) the live session hasn't seen yet.
+// the owner's comments the live session hasn't seen yet (answers are comments too).
+// the owner's comments and review decisions (from them or the team) the live session hasn't seen yet.
 const undeliveredComments = (taskId) =>
   db(
     `task_comments?task_id=eq.${taskId}&author=in.(me,reviewer)&delivered_at=is.null&order=created_at&select=id,author,author_name,body`,
@@ -112,7 +114,7 @@ async function markDelivered(comments) {
 
 const formatComments = (comments) =>
   comments
-    .map((c) => (c.author === "reviewer" ? `Review from ${c.author_name ?? "the team"}: ${c.body}` : `Chris on the board: ${c.body}`))
+    .map((c) => (c.author === "reviewer" ? `Review from ${c.author_name ?? "the team"}: ${c.body}` : `${OWNER} on the board: ${c.body}`))
     .join(" | ");
 
 // ---------- Prompt + launch ----------
@@ -186,7 +188,7 @@ export async function baseBranch(repoPath, preferred) {
 }
 
 // A worktree for this task from the latest origin/<base>. The main checkout is never switched or
-// pulled, so whatever Chris (or another session) has open there is untouched.
+// pulled, so whatever the owner (or another session) has open there is untouched.
 export async function createWorktree(repo, task, base) {
   const path = join(repo.path, ".claude", "worktrees", worktreeName(task));
   const branch = `worktree-${worktreeName(task)}`;
@@ -242,16 +244,16 @@ How to work:
     } Attach important outputs with update_task(id=${id}, add_links=[{title, url: "file://..."}]).${
       repo
         ? `
-- Code changes: commit to this branch, push it with \`git push -u origin HEAD\`, open a PR against ${repo.base} (\`gh pr create --base ${repo.base}\`), attach the PR with add_links, then hand review to Chris with add_human_task(parent_id=${id}, title="Review and merge PR #<n>: ..."). Never merge it yourself unless Chris explicitly asks you to in this task. The runner removes this worktree once the PR is merged.`
+- Code changes: commit to this branch, push it with \`git push -u origin HEAD\`, open a PR against ${repo.base} (\`gh pr create --base ${repo.base}\`), attach the PR with add_links, then hand review to ${OWNER} with add_human_task(parent_id=${id}, title="Review and merge PR #<n>: ..."). Never merge it yourself unless ${OWNER} explicitly asks you to in this task. The runner removes this worktree once the PR is merged.`
         : ""
     }
-- Use the control-center MCP tools. Write comments and hand-off instructions in Markdown. Log progress with update_task(id=${id}, log=...). Post anything Chris should read (a draft, a finding, a decision you made) with add_comment(id=${id}, body, author="agent"); it lands in his inbox.
-- If you need a decision or information from Chris: call ask_human(id=${id}, question, session_id="${sessionId}"), then ask the same question here and wait. He may answer here, or on the board, in which case it's typed in here as "Chris on the board: ...". Once answered, call update_task(id=${id}, status="in_progress").
-- Chris may also comment while you work; those arrive here the same way. Treat them as instructions. If this task was handed to you with an @agent comment, that latest comment is your brief: do what it asks, using the description and history for context.
-- Anything only a human can or should do (posting publicly, sending messages or email as Chris, payments, calls, logging into accounts, physical errands): prepare everything, then call add_human_task(parent_id=${id}, ...) with exact instructions and any drafts. Do not do those yourself unless the description explicitly says to.
-- If you've done your part but the rest of this task is Chris's (decisions, posting, steps he has to do), hand it back instead of completing it: update_task(id=${id}, kind="human", status="ready", log="<what you did; what's left for Chris>"). For a separate human step on a task you are finishing, use add_human_task. Never set status "new".
-- Share outputs as links, not file paths: \`cc-publish <file> --title "<what it is, e.g. Cut v2 · 9:16>"\` uploads it, attaches it to this task and prints a link. Videos get a review page where Chris and the team comment on exact frames; images, PDFs and HTML pages open inline.
-- When a video or other output needs sign-off (a cut, a design, a page), publish it, say what changed and give the link, then stop and wait. Chris or the team review it and their decision arrives here as "Review from <name>: Approved ..." or "Changes requested ..." with timecoded notes (and a still of each frame you can open). For changes, make the next version, publish it with the next version number, and wait again. Once approved, finish up.
+- Use the control-center MCP tools. Write comments and hand-off instructions in Markdown. Log progress with update_task(id=${id}, log=...). Post anything ${OWNER} should read (a draft, a finding, a decision you made) with add_comment(id=${id}, body, author="agent"); it lands in his inbox.
+- If you need a decision or information from ${OWNER}: call ask_human(id=${id}, question, session_id="${sessionId}"), then ask the same question here and wait. He may answer here, or on the board, in which case it's typed in here as "${OWNER} on the board: ...". Once answered, call update_task(id=${id}, status="in_progress").
+- ${OWNER} may also comment while you work; those arrive here the same way. Treat them as instructions. If this task was handed to you with an @agent comment, that latest comment is your brief: do what it asks, using the description and history for context.
+- Anything only a human can or should do (posting publicly, sending messages or email as ${OWNER}, payments, calls, logging into accounts, physical errands): prepare everything, then call add_human_task(parent_id=${id}, ...) with exact instructions and any drafts. Do not do those yourself unless the description explicitly says to.
+- If you've done your part but the rest of this task is ${OWNER}'s (decisions, posting, steps they have to do), hand it back instead of completing it: update_task(id=${id}, kind="human", status="ready", log="<what you did; what's left for ${OWNER}>"). For a separate human step on a task you are finishing, use add_human_task. Never set status "new".
+- Share outputs as links, not file paths: \`cc-publish <file> --title "<what it is, e.g. Cut v2 · 9:16>"\` uploads it, attaches it to this task and prints a link. Videos get a review page where ${OWNER} and the team comment on exact frames; images, PDFs and HTML pages open inline.
+- When a video or other output needs sign-off (a cut, a design, a page), publish it, say what changed and give the link, then stop and wait. ${OWNER} or the team review it and their decision arrives here as "Review from <name>: Approved ..." or "Changes requested ..." with timecoded notes (and a still of each frame you can open). For changes, make the next version, publish it with the next version number, and wait again. Once approved, finish up.
 - When finished, call complete_task(id=${id}, summary=...) with what you did and where outputs are. The runner closes this window a few minutes later; the session can be resumed from the board if needed.
 - Only work on this task.`,
   ];
@@ -347,7 +349,7 @@ const minutesSince = (iso) => (Date.now() - new Date(iso).getTime()) / 60000;
 async function closeFinished(workspaces, activeIds) {
   const ids = [...workspaces.keys()].filter((id) => !activeIds.has(id));
   if (!ids.length) return;
-  // Finished, or no longer the agent's (handed back to Chris, or moved back to new).
+  // Finished, or no longer the agent's (handed back to the owner, or moved back to new).
   const tasks = await db(
     `tasks?id=in.(${ids.join(",")})&or=(status.in.(done,cancelled,new),kind.neq.agent)&select=id,status,completed_at,updated_at`,
   );
@@ -503,7 +505,7 @@ async function tick() {
   for (const task of tasks) {
     const ws = workspaces.get(task.id);
     try {
-      // Waiting on Chris: a comment from him in a live session counts as his reply.
+      // Waiting on the owner: a comment from them in a live session counts as their reply.
       if (task.status === "needs_you") {
         if (!ws) continue;
         const pending = await undeliveredComments(task.id);
@@ -523,7 +525,7 @@ async function tick() {
             log(`delivered ${pending.length} comment(s) to CC-${task.id}`);
           }
         } else if (task.session_id) {
-          // Runner-owned session whose window is gone: park it for Chris instead of looping.
+          // Runner-owned session whose window is gone: park it for the owner instead of looping.
           const question = "The session window closed before the task finished. Answer to resume it (add any guidance).";
           await patchTask(task.id, { status: "needs_you", question }, "&status=eq.in_progress");
           await addEvent(task.id, "question", question);
@@ -534,7 +536,7 @@ async function tick() {
       // status === "ready": answered (live or closed session), or new work.
       if (ws && task.session_id) {
         const pending = await undeliveredComments(task.id);
-        await typeInto(ws, pending.length ? formatComments(pending) : "Chris marked this ready on the board; continue.");
+        await typeInto(ws, pending.length ? formatComments(pending) : `${OWNER} marked this ready on the board; continue.`);
         await markDelivered(pending);
         await patchTask(task.id, { status: "in_progress" });
         log(`delivered answer to CC-${task.id}`);

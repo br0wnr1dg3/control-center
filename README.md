@@ -13,7 +13,11 @@ Email (AgentMail webhook) ──────┼─► Cloudflare Worker (MCP + O
 - `runner/`: picks up ready agent tasks and runs each in its own `claude` session (cmux workspace, git worktree, Remote Control), then cleans up
 - `mac/`: SwiftUI board app: Inbox, Today, Upcoming calendar, board, full-page tasks, team settings
 
-Built for one person (single owner, service-role access, macOS paths). Fork it and swap in your own Supabase project, Worker URL and teams.
+Built for one person (single owner, service-role access, macOS paths). To run your own:
+
+- Point it at your Supabase project and Worker URL (`CC_SUPABASE_URL`, `PUBLIC_URL`, `wrangler.jsonc`).
+- Set your name for agent and connector prompts: the `OWNER_NAME` Worker secret and `CC_OWNER_NAME=<name> runner/install.sh`. Unset, they say "the owner".
+- Personal setup (teams, GitHub orgs, folders, base branches, pinned projects, repo nicknames) is data, not code: set it in the app's team settings, or copy `supabase/seed.example.sql` to the git-ignored `supabase/seed.local.sql` and run it once.
 
 ## Task model
 

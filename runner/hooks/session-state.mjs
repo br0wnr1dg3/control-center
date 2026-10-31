@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Claude Code hook for runner-started sessions: keeps the board in step with the terminal.
 //
-//   session-state.mjs waiting <taskId>   Stop / Notification: the session is waiting on Chris, so an
+//   session-state.mjs waiting <taskId>   Stop / Notification: the session is waiting on the owner, so an
 //                                        in-progress task moves to needs_you with what it said last.
 //   session-state.mjs resumed <taskId>   UserPromptSubmit: someone typed into the session, so a
 //                                        needs_you task goes back to in_progress.

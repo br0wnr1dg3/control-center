@@ -4,7 +4,7 @@
 
 create table teams (
   id          bigint generated always as identity primary key,
-  key         text not null unique check (key ~ '^[a-z0-9][a-z0-9-]*$'),  -- slug for tools: "flixr"
+  key         text not null unique check (key ~ '^[a-z0-9][a-z0-9-]*$'),  -- slug for tools: "acme"
   name        text not null check (length(name) between 1 and 80),
   kind        text not null default 'company' check (kind in ('company', 'personal')),
   color       text,                        -- hex, e.g. #F97316
@@ -82,13 +82,7 @@ alter table teams enable row level security;
 alter table projects enable row level security;
 alter publication supabase_realtime add table teams, projects;
 
--- Starting teams; rename or add more in the app.
-insert into teams (key, name, kind, color, sort_order) values
-  ('personal', 'Personal', 'personal', '#22C55E', 0),
-  ('flixr', 'Flixr', 'company', '#F97316', 1);
-
+-- Register projects already used on tasks. Teams are created in the app (or a local seed file).
 insert into projects (name)
   select distinct project from tasks where project is not null
   on conflict do nothing;
-
-update projects set team_id = (select id from teams where key = 'flixr') where lower(name) = 'content';

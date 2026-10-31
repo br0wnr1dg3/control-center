@@ -8,7 +8,7 @@
 //   GET  /r/<token>/still/<name>                          a commented frame
 //   POST /r/<token>/decision                              approve / request changes
 //
-// The link is the access control (a long random token), which is fine for Chris and his team. Notes
+// The link is the access control (a long random token), which is fine for the owner and their team. Notes
 // are stored already delivered; the decision is posted to the task as one comment listing them, so a
 // waiting agent gets the whole review at once.
 

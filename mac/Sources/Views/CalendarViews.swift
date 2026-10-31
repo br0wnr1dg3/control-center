@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// One day at a time: what's on Chris's list that day, agents' work, and what got done.
+/// One day at a time: what's on the owner's list that day, agents' work, and what got done.
 struct DayView: View {
     @Bindable var store = BoardStore.shared
 
