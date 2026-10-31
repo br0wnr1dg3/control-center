@@ -135,15 +135,21 @@ struct InboxView: View {
 struct InboxThreadRow: View {
     let thread: InboxThread
 
+    /// A question whose task has moved on (answered here, in the session, or dismissed).
+    private var answered: Bool {
+        ["question", "stalled"].contains(thread.latest.kind) && thread.task.status != .needs_you
+    }
+
     var body: some View {
         let item = thread.latest
+        let color = answered ? Color.secondary : item.color
         HStack(alignment: .top, spacing: 10) {
             Circle()
                 .fill(thread.isUnread ? Color.accentColor : .clear)
                 .frame(width: 7, height: 7)
                 .padding(.top, 6)
-            Image(systemName: item.symbol)
-                .foregroundStyle(item.color)
+            Image(systemName: answered ? "checkmark.bubble" : item.symbol)
+                .foregroundStyle(color)
                 .frame(width: 18)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 2) {
@@ -156,7 +162,7 @@ struct InboxThreadRow: View {
                     Text(item.createdAt.relativeTime).font(.caption).foregroundStyle(.tertiary).fixedSize()
                 }
                 HStack(spacing: 4) {
-                    Text(item.headline).foregroundStyle(item.color)
+                    Text(answered ? "Answered" : item.headline).foregroundStyle(color)
                     if let snippet = snippet(item) { Text("· \(snippet)").foregroundStyle(.secondary) }
                     if thread.unreadCount > 1 { Text("+\(thread.unreadCount - 1)").foregroundStyle(.tertiary) }
                 }
