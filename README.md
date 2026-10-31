@@ -103,7 +103,7 @@ runner/install.sh                 # launchd agent: start at login, keep alive (l
 runner/install.sh uninstall
 ```
 
-New machine (e.g. the Mac mini): also clone the team folders that team settings point at (`~/Developer/projects/flixr`, `challenger-gray`, `the-residence`, one folder per repo) so agents find the same paths.
+New machine: `node runner/clone-repos.mjs` clones every repo on the board into the same folders (the runner's published inventory, minus hidden ones), so agents find the same paths everywhere. `CC_MAX_CONCURRENT=<n>` on `install.sh` sets how many agents run at once.
 
 Requires: cmux, `claude` signed in to the control-center MCP (`/mcp`), service key in Keychain (`control-center service key`). Env overrides: `CC_MAX_CONCURRENT`, `CC_POLL_SECONDS`, `CC_CLOSE_AFTER_MINUTES`, `CC_CLEANUP_MINUTES`. Needs `git` and `gh` (signed in) for worktree cleanup.
 

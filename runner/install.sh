@@ -17,7 +17,8 @@ if [[ ${1:-} == uninstall ]]; then
   exit 0
 fi
 
-# CC_OWNER_NAME=<your name> runner/install.sh  names you in agent prompts ("waiting on <name>").
+# CC_OWNER_NAME=<your name> names you in agent prompts ("waiting on <name>");
+# CC_MAX_CONCURRENT=<n> sets how many agent sessions run at once (default 2).
 mkdir -p ~/Developer/ControlCenter ~/Library/LaunchAgents
 cat > $PLIST <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -31,6 +32,7 @@ cat > $PLIST <<EOF
   <dict>
     <key>PATH</key><string>$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     <key>CC_OWNER_NAME</key><string>${CC_OWNER_NAME:-the owner}</string>
+    <key>CC_MAX_CONCURRENT</key><string>${CC_MAX_CONCURRENT:-2}</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
