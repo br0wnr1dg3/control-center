@@ -95,8 +95,11 @@ async function typeInto(workspace, text) {
 const localDay = () => new Date().toLocaleDateString("en-CA");
 
 // Chris's comments the live session hasn't seen yet (answers are comments too).
+// Chris's comments and review decisions (from him or the team) the live session hasn't seen yet.
 const undeliveredComments = (taskId) =>
-  db(`task_comments?task_id=eq.${taskId}&author=eq.me&delivered_at=is.null&order=created_at&select=id,body`);
+  db(
+    `task_comments?task_id=eq.${taskId}&author=in.(me,reviewer)&delivered_at=is.null&order=created_at&select=id,author,author_name,body`,
+  );
 
 async function markDelivered(comments) {
   if (!comments.length) return;
@@ -107,7 +110,10 @@ async function markDelivered(comments) {
   });
 }
 
-const formatComments = (comments) => comments.map((c) => `Chris on the board: ${c.body}`).join(" | ");
+const formatComments = (comments) =>
+  comments
+    .map((c) => (c.author === "reviewer" ? `Review from ${c.author_name ?? "the team"}: ${c.body}` : `Chris on the board: ${c.body}`))
+    .join(" | ");
 
 // ---------- Prompt + launch ----------
 
@@ -244,6 +250,8 @@ How to work:
 - Chris may also comment while you work; those arrive here the same way. Treat them as instructions. If this task was handed to you with an @agent comment, that latest comment is your brief: do what it asks, using the description and history for context.
 - Anything only a human can or should do (posting publicly, sending messages or email as Chris, payments, calls, logging into accounts, physical errands): prepare everything, then call add_human_task(parent_id=${id}, ...) with exact instructions and any drafts. Do not do those yourself unless the description explicitly says to.
 - If you've done your part but the rest of this task is Chris's (decisions, posting, steps he has to do), hand it back instead of completing it: update_task(id=${id}, kind="human", status="ready", log="<what you did; what's left for Chris>"). For a separate human step on a task you are finishing, use add_human_task. Never set status "new".
+- Share outputs as links, not file paths: \`cc-publish <file> --title "<what it is, e.g. Cut v2 · 9:16>"\` uploads it, attaches it to this task and prints a link. Videos get a review page where Chris and the team comment on exact frames; images, PDFs and HTML pages open inline.
+- When a video or other output needs sign-off (a cut, a design, a page), publish it, say what changed and give the link, then stop and wait. Chris or the team review it and their decision arrives here as "Review from <name>: Approved ..." or "Changes requested ..." with timecoded notes (and a still of each frame you can open). For changes, make the next version, publish it with the next version number, and wait again. Once approved, finish up.
 - When finished, call complete_task(id=${id}, summary=...) with what you did and where outputs are. The runner closes this window a few minutes later; the session can be resumed from the board if needed.
 - Only work on this task.`,
   ];
@@ -299,7 +307,7 @@ async function launch(task, { resume = false } = {}) {
       db(`task_events?task_id=eq.${task.id}&order=created_at&select=kind,body`),
     ]);
     await writeFile(join(dir, "prompt.md"), taskPrompt(task, sessionId, dir, comments, activity, team, project, worktree && repo, folder));
-    await markDelivered(comments.filter((c) => c.author === "me"));
+    await markDelivered(comments.filter((c) => c.author === "me" || c.author === "reviewer"));
     claudeArgs = `--session-id ${sessionId}`;
   }
 
@@ -311,6 +319,8 @@ async function launch(task, { resume = false } = {}) {
     script,
     `#!/bin/zsh -l
 cd ${JSON.stringify(cwd)}
+export CC_TASK_ID=${task.id}
+export PATH=${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), "bin"))}:$PATH
 exec claude "$(cat ${JSON.stringify(join(dir, "prompt.md"))})" ${claudeArgs}${worktreeArgs} --name ${JSON.stringify(workspaceTitle(task))} \\
   --remote-control ${JSON.stringify(workspaceTitle(task))} --settings ${JSON.stringify(settings)} \\
   --dangerously-skip-permissions

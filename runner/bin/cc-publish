@@ -1,0 +1,66 @@
+#!/usr/bin/env node
+// Publish a file to the Control Center review page and attach the link to the task.
+//
+//   cc-publish <file> [--title "Cut v2 · 9:16"] [--task 52]
+//
+// Prints the review link. The task defaults to $CC_TASK_ID (set for runner sessions). Videos get a
+// frame-accurate review page; images, PDFs and HTML pages are shown inline; anything else downloads.
+
+import { execFileSync } from "node:child_process";
+import { createReadStream, statSync } from "node:fs";
+import { basename, extname } from "node:path";
+import { Readable } from "node:stream";
+
+const TYPES = {
+  ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".m4v": "video/mp4",
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+  ".pdf": "application/pdf", ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8", ".md": "text/plain; charset=utf-8", ".json": "application/json",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav", ".csv": "text/csv; charset=utf-8",
+};
+
+const args = process.argv.slice(2);
+const flag = (name) => {
+  const i = args.indexOf(`--${name}`);
+  return i >= 0 ? args.splice(i, 2)[1] : undefined;
+};
+const title = flag("title");
+const task = flag("task") ?? process.env.CC_TASK_ID;
+const file = args[0];
+if (!file || !task) {
+  console.error("usage: cc-publish <file> [--title <title>] [--task <id>]   (task defaults to $CC_TASK_ID)");
+  process.exit(1);
+}
+
+const size = statSync(file).size;
+if (size > 100 * 1024 * 1024) {
+  console.error(`${file} is ${(size / 1048576).toFixed(0)} MB; uploads are limited to 100 MB. Export a smaller review copy.`);
+  process.exit(1);
+}
+
+const base = process.env.CC_PUBLIC_URL ?? "https://control-center-mcp.chrisbrownridge.workers.dev";
+const token =
+  process.env.CC_UPLOAD_TOKEN ??
+  execFileSync("security", ["find-generic-password", "-a", "control-center", "-s", "control-center upload token", "-w"]).toString().trim();
+
+const url = new URL("/api/publish", base);
+url.searchParams.set("task", String(task).replace(/^cc-/i, ""));
+url.searchParams.set("filename", basename(file));
+url.searchParams.set("title", title ?? basename(file));
+
+const res = await fetch(url, {
+  method: "PUT",
+  headers: {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": TYPES[extname(file).toLowerCase()] ?? "application/octet-stream",
+    "Content-Length": String(size),
+  },
+  body: Readable.toWeb(createReadStream(file)),
+  duplex: "half",
+});
+const body = await res.text();
+if (!res.ok) {
+  console.error(`publish failed: ${res.status} ${body}`);
+  process.exit(1);
+}
+console.log(JSON.parse(body).url);

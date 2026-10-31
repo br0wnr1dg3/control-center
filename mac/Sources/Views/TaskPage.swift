@@ -237,18 +237,41 @@ struct TaskPage: View {
 struct CommentBubble: View {
     let comment: TaskComment
 
+    private var icon: String {
+        switch comment.author {
+        case "me": "person.crop.circle.fill"
+        case "reviewer": "play.rectangle.fill"
+        default: "sparkles"
+        }
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: comment.author == "me" ? "person.crop.circle.fill" : "sparkles")
+            Image(systemName: icon)
                 .font(.system(size: 16))
-                .foregroundStyle(comment.author == "me" ? Color.accentColor : .purple)
+                .foregroundStyle(comment.author == "me" ? Color.accentColor : comment.author == "reviewer" ? .orange : .purple)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(comment.authorName).font(.callout.weight(.semibold))
+                    if let time = comment.timecodeLabel {
+                        Text(time).font(.caption.monospacedDigit()).foregroundStyle(Color.accentColor)
+                    }
                     Text(comment.createdAt.relativeTime).font(.caption).foregroundStyle(.tertiary)
                 }
-                MarkdownView(text: comment.body, size: 13, selectable: true)
+                HStack(alignment: .top, spacing: 10) {
+                    if let still = comment.stillUrl.flatMap(URL.init(string:)) {
+                        AsyncImage(url: still) { image in
+                            image.resizable().scaledToFit()
+                        } placeholder: {
+                            Color.secondary.opacity(0.1)
+                        }
+                        .frame(width: 90, height: 90)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .onTapGesture { NSWorkspace.shared.open(still) }
+                    }
+                    MarkdownView(text: comment.body, size: 13, selectable: true)
+                }
             }
             Spacer(minLength: 0)
         }

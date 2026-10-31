@@ -8,6 +8,9 @@
     // Create with: npx wrangler kv namespace create OAUTH_KV — then paste the id here.
     { "binding": "OAUTH_KV", "id": "d2ed4d059c524cae87b1968487081519" }
   ],
+  // Review media: renders and other outputs agents publish (src/review.ts). Uploads need the
+  // UPLOAD_TOKEN secret; each file is then readable only through its /r/<token> link.
+  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "control-center-media" }],
   "vars": {
     "TIMEZONE": "America/Los_Angeles",
     "PUBLIC_URL": "https://control-center-mcp.chrisbrownridge.workers.dev"

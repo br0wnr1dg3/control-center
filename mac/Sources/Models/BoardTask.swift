@@ -187,18 +187,28 @@ struct TaskComment: Codable, Identifiable, Equatable {
     let author: String
     let body: String
     let createdAt: String
+    var reviewer: String?   // name on review-page notes and decisions
+    var timecode: Double?   // seconds into the video a review note is about
+    var stillUrl: String?   // the commented frame
 
     enum CodingKeys: String, CodingKey {
-        case id, author, body
+        case id, author, body, timecode
         case createdAt = "created_at"
+        case reviewer = "author_name"
+        case stillUrl = "still_url"
     }
 
     var authorName: String {
         switch author {
         case "me": "You"
         case "agent": "Agent"
+        case "reviewer": reviewer ?? "Reviewer"
         default: "Claude"
         }
+    }
+
+    var timecodeLabel: String? {
+        timecode.map { String(format: "%d:%04.1f", Int($0) / 60, $0.truncatingRemainder(dividingBy: 60)) }
     }
 }
 

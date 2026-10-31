@@ -77,6 +77,10 @@ node scripts/smoke.mjs              # full OAuth + tool round-trip
 
 Forward an email to **brownridge@agentmail.to** and it becomes task(s). AgentMail posts each message to `/hooks/agentmail` (Svix signature checked with `AGENTMAIL_WEBHOOK_SECRET`). Only `ALLOWED_SENDERS` count, and only when DKIM/DMARC pass for that domain. With `ANTHROPIC_API_KEY` set, Claude Haiku 5.5 (structured output) writes proper tickets: team, project, kind, dates, split into several if needed; without it the subject and email become one plain ticket. Tickets land as **New**; "@agent" in your own note (not the forwarded text) makes agent tickets Ready. The inbox replies with the CC keys.
 
+## Reviews (`mcp/src/review.ts`, `runner/bin/cc-publish`)
+
+Agents share outputs as links, not file paths: `cc-publish <file> --title "Cut v2 · 9:16"` uploads to R2 (bucket `control-center-media`, Bearer `UPLOAD_TOKEN`), attaches the link to the task and prints it. Each file gets a private `/r/<token>` page: videos get a frame-accurate player (frame stepping, timeline markers) where Chris and the team leave notes on exact frames (with a still of each), then **Approve** or **Request changes**; images, PDFs and HTML pages open inline (HTML sandboxed). Notes are stored quietly; the decision is posted to the task as one `reviewer` comment listing every note with its timecode, lands in the inbox, and the runner types it into the waiting agent session, which makes the next version or wraps up.
+
 ## Runner (`runner/`)
 
 Polls every 20s. Only tasks with `kind = agent` **and** `status = ready` are started, so moving a task to ready (directly or via `plan_today`) is the approval step.
