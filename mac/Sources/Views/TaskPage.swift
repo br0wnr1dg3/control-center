@@ -276,6 +276,10 @@ struct ReplyCard: View {
                 Text("Agent").font(.callout.weight(.semibold))
                 Text("is waiting on you").font(.callout).foregroundStyle(.secondary)
                 Spacer()
+                Button { store.dismissQuestion(task) } label: { Label("Not needed", systemImage: "xmark") }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
+                    .help("Nothing to answer: back to In progress and out of your inbox")
                 if Cmux.isInstalled && task.sessionId != nil {
                     Button { Cmux.openSession(taskId: task.id) } label: { Label("Open session", systemImage: "terminal") }
                         .buttonStyle(.borderless)

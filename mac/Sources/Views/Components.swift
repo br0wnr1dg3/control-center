@@ -247,6 +247,8 @@ struct NeedsYouCard: View {
                     Button { Cmux.openSession(taskId: task.id) } label: { Image(systemName: "terminal") }
                         .help("Open the Claude session")
                 }
+                Button { store.dismissQuestion(task) } label: { Image(systemName: "xmark") }
+                    .help("Not needed: back to In progress and out of your inbox")
             }
         }
         .padding(compact ? 8 : 10)

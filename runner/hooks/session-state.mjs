@@ -57,6 +57,11 @@ function lastAssistantText(input) {
   return "";
 }
 
+// Ending a turn isn't always waiting on someone: agents also stop with a progress note while
+// renders or builds run in the background. Only flag the task when the last message asks something.
+const ASKS = /\?|let me know|your call|which (one|option|do you)|do you want|would you like|should i\b|shall i\b|want me to|please (confirm|choose|decide|review|approve|send|share|provide|check)|waiting (on|for) (you|your)|need (your|you to)|up to you/i;
+const asksSomething = (text) => ASKS.test(text.slice(-800));
+
 // The agent's last words, kept whole unless very long; then the end, starting at a line break.
 function excerpt(text, max = 6000) {
   if (text.length <= max) return text.trim();
@@ -69,7 +74,9 @@ try {
   if (!/^\d+$/.test(taskId ?? "")) process.exit(0);
 
   if (mode === "waiting") {
-    const said = excerpt(lastAssistantText(input)) || input.message || "";
+    const last = lastAssistantText(input);
+    if (!asksSomething(last)) process.exit(0); // a progress note, not a question
+    const said = excerpt(last) || input.message || "";
     await patch("in_progress", {
       status: "needs_you",
       question: `Waiting for your input in the session.${said ? `\n\n${said}` : ""}`,

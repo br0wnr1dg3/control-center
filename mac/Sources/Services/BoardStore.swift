@@ -276,6 +276,13 @@ final class BoardStore {
         }
     }
 
+    /// The agent didn't really need anything: back to in progress, out of the inbox.
+    func dismissQuestion(_ task: BoardTask) {
+        mutate(task.id, local: { $0.status = .in_progress; $0.question = nil; $0.questionOptions = nil }) { api in
+            try await api.update(task.id, ["status": "in_progress", "question": NSNull()], onlyIfStatus: .needs_you)
+        }
+    }
+
     func comment(on task: BoardTask, _ text: String) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
