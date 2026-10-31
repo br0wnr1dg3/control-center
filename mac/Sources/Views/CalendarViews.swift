@@ -1,31 +1,34 @@
 import SwiftUI
 
-/// One day at a time: what's on the owner's list that day, agents' work, and what got done.
+/// Your plan for a day, Linear-style: overdue, your tasks, agents' work, done. Questions and
+/// reviews live in the Inbox; when any are waiting, a one-line banner links there.
 struct DayView: View {
     @Bindable var store = BoardStore.shared
 
     var body: some View {
         let day = store.day
+        let isToday = day == Day.today
         let list = store.tasks(on: day)
         let mine = list.filter { $0.kind != .agent }
-        let agents = list.filter { $0.kind == .agent }
+        let overdue = isToday ? mine.filter(\.isOverdue) : []
+        let rest = mine.filter { !overdue.contains($0) }
+        // Agents due or scheduled that day, plus (today) anything running or waiting right now.
+        let live = isToday ? store.tasks.filter { $0.kind == .agent && ($0.status == .in_progress || $0.status == .needs_you) } : []
+        let scheduled = list.filter { $0.kind == .agent }
+        let agents = store.sorted(scheduled + live.filter { t in !scheduled.contains { $0.id == t.id } })
         let done = store.done(on: day)
 
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-
-                if day == Day.today && !store.needsYou.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        SectionHeader(title: "Needs you", count: store.needsYou.count, color: .orange)
-                        ForEach(store.needsYou) { NeedsYouCard(task: $0) }
-                    }
-                }
-
-                group("For me", mine, empty: "Nothing for you \(day == Day.today ? "today" : "this day").")
-                if !agents.isEmpty { group("Agents", agents) }
-                if !done.isEmpty { group("Done", done) }
+            VStack(alignment: .leading, spacing: 22) {
+                if isToday && !store.needsYou.isEmpty { waitingBanner }
+                if !overdue.isEmpty { section("Overdue", overdue, tint: .red) }
+                section("Your tasks", rest, empty: isToday ? "Nothing else on your plate today." : "Nothing planned for you this day.")
+                if !agents.isEmpty { section("Agents", agents) }
+                if !done.isEmpty { section("Done", done, tint: .green) }
             }
-            .padding(20)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 20)
+            .frame(maxWidth: 1000, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .dropDestination(for: String.self) { items, _ in
@@ -39,19 +42,52 @@ struct DayView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button { store.day = Day.adding(-1, to: day) } label: { Image(systemName: "chevron.left") }
-                Button("Today") { store.day = Day.today }.disabled(day == Day.today)
+                Button("Today") { store.day = Day.today }.disabled(isToday)
                 Button { store.day = Day.adding(1, to: day) } label: { Image(systemName: "chevron.right") }
             }
         }
     }
 
-    private func group(_ title: String, _ tasks: [BoardTask], empty: String? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            SectionHeader(title: title, count: tasks.count)
-            if tasks.isEmpty, let empty {
-                Text(empty).foregroundStyle(.secondary).padding(.vertical, 4)
+    private var waitingBanner: some View {
+        let count = store.needsYou.count
+        return Button {
+            store.section = .inbox
+            store.open(store.needsYou[0].id)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "questionmark.bubble.fill").foregroundStyle(.orange)
+                Text(count == 1 ? "An agent is waiting on you" : "\(count) agents are waiting on you").fontWeight(.medium)
+                Text(store.needsYou.prefix(2).map(\.title).joined(separator: " · "))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                Text("Open Inbox").foregroundStyle(Color.accentColor)
+                Image(systemName: "arrow.right").font(.caption).foregroundStyle(Color.accentColor)
             }
-            ForEach(tasks) { TaskRow(task: $0) }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Color.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.3)))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func section(_ title: String, _ tasks: [BoardTask], tint: Color = .secondary, empty: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Text(title).font(.callout.weight(.semibold)).foregroundStyle(tint == .secondary ? .primary : tint)
+                Text("\(tasks.count)").font(.callout).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 6)
+            if tasks.isEmpty, let empty {
+                Text(empty).font(.callout).foregroundStyle(.tertiary).padding(.horizontal, 8).padding(.vertical, 4)
+            }
+            ForEach(tasks) { task in
+                TaskRow(task: task, showDate: true)
+                if task.id != tasks.last?.id { Divider().opacity(0.5).padding(.leading, 34) }
+            }
         }
     }
 }

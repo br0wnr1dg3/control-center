@@ -269,7 +269,8 @@ struct InboxItem: Codable, Identifiable, Equatable {
     var headline: String {
         switch kind {
         case "question": "Agent needs an answer"
-        case "comment": "New comment"
+        case "comment":
+            body.hasPrefix("Changes requested") ? "Changes requested" : body.hasPrefix("Approved") ? "Approved" : "New comment"
         case "handoff": "Handed to you"
         case "done": "Agent finished"
         default: "Session stopped"

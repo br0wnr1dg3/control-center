@@ -10,7 +10,7 @@ struct MainWindow: View {
                     .badge(store.unreadCount)
                     .tag(Section.inbox)
                 Label("Today", systemImage: "sun.max")
-                    .badge(store.onYourPlate.count + store.needsYou.count)
+                    .badge(store.onYourPlate.count)
                     .tag(Section.today)
                 Label("Upcoming", systemImage: "calendar")
                     .tag(Section.upcoming)
@@ -41,7 +41,8 @@ struct MainWindow: View {
             .safeAreaInset(edge: .bottom) { statusFooter }
         } detail: {
             // An open task takes over the whole content area, like Linear's issue page.
-            if let task = store.selectedTask {
+            // The Inbox shows its selected task in its own detail pane.
+            if store.section != .inbox, let task = store.selectedTask {
                 TaskPage(task: task)
             } else {
                 switch store.section {

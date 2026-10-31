@@ -56,7 +56,8 @@ final class BoardStore {
     }
 
     var selectedTask: BoardTask? { selectedTaskId.flatMap(task) }
-    var unreadCount: Int { inbox.filter(\.isUnread).count }
+    /// Unread inbox rows (tasks with something new), as the sidebar and menu bar count them.
+    var unreadCount: Int { inboxThreads.filter(\.isUnread).count }
     /// Questions from any team: they block agents, so they show whichever team is in view.
     var needsYou: [BoardTask] { allTasks.filter { $0.status == .needs_you } }
     var running: [BoardTask] { tasks.filter { $0.status == .in_progress && $0.kind == .agent } }
@@ -374,6 +375,26 @@ final class BoardStore {
         }
         Task {
             do { try await client().markRead(ids: ids) } catch { lastError = error.localizedDescription }
+        }
+    }
+
+    /// Inbox items grouped one row per task, newest activity first (Linear-style).
+    var inboxThreads: [InboxThread] {
+        Dictionary(grouping: inbox, by: \.task.id)
+            .map { InboxThread(items: $0.value.sorted { $0.createdAt > $1.createdAt }) }
+            .sorted { $0.latest.createdAt > $1.latest.createdAt }
+    }
+
+    /// Archive = read: it leaves the Unread view.
+    func archive(_ thread: InboxThread) { markRead(ids: thread.items.filter(\.isUnread).map(\.id)) }
+
+    func markUnread(_ thread: InboxThread) {
+        let id = thread.latest.id
+        inbox = inbox.map { item in
+            item.id == id ? InboxItem(id: item.id, kind: item.kind, body: item.body, readAt: nil, createdAt: item.createdAt, task: item.task) : item
+        }
+        Task {
+            do { try await client().markUnread(ids: [id]) } catch { lastError = error.localizedDescription }
         }
     }
 

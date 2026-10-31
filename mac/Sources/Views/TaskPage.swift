@@ -3,6 +3,8 @@ import SwiftUI
 /// Full-page issue view, Linear-style: content and timeline on the left, properties on the right.
 struct TaskPage: View {
     let task: BoardTask
+    /// Shown inside another view (the Inbox's detail pane): no back button or Esc, narrower properties.
+    var embedded = false
     var store = BoardStore.shared
 
     @State private var title = ""
@@ -22,6 +24,7 @@ struct TaskPage: View {
                         .onSubmit(saveTitle)
                         .onChange(of: editingTitle) { _, focused in if !focused { saveTitle() } }
 
+                    if embedded { CompactProperties(task: task) }
                     if task.status == .needs_you { NeedsYouCard(task: task) }
 
                     descriptionEditor
@@ -31,30 +34,34 @@ struct TaskPage: View {
                     timeline
                     composer
                 }
-                .padding(.horizontal, 40)
-                .padding(.vertical, 28)
+                .padding(.horizontal, embedded ? 28 : 40)
+                .padding(.vertical, embedded ? 20 : 28)
                 .frame(maxWidth: 820, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
 
-            Divider()
-
-            ScrollView {
-                TaskProperties(task: task)
-                    .padding(20)
+            // In the Inbox the properties sit in a strip under the title, leaving room to read.
+            if !embedded {
+                Divider()
+                ScrollView {
+                    TaskProperties(task: task)
+                        .padding(20)
+                }
+                .frame(width: 290)
+                .background(Color.secondary.opacity(0.04))
             }
-            .frame(width: 290)
-            .background(Color.secondary.opacity(0.04))
         }
         .onAppear(perform: load)
         .onChange(of: task.id) { _, _ in load() }
         .onChange(of: task.title) { _, new in if !editingTitle { title = new } }
-        .onExitCommand { store.selectedTaskId = nil }
-        .navigationTitle(task.key)
+        .onExitCommand { if !embedded { store.selectedTaskId = nil } }
+        .navigationTitle(embedded ? "Inbox" : task.key)
         .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button { store.selectedTaskId = nil } label: { Image(systemName: "chevron.left") }
-                    .help("Back (Esc)")
+            if !embedded {
+                ToolbarItem(placement: .navigation) {
+                    Button { store.selectedTaskId = nil } label: { Image(systemName: "chevron.left") }
+                        .help("Back (Esc)")
+                }
             }
             if task.kind == .agent && task.status == .in_progress && Cmux.isInstalled {
                 ToolbarItem {
@@ -278,6 +285,56 @@ struct CommentBubble: View {
         .padding(12)
         .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
     }
+}
+
+/// The key properties as one wrapping row of menus, for the Inbox's detail pane.
+struct CompactProperties: View {
+    let task: BoardTask
+    var store = BoardStore.shared
+
+    var body: some View {
+        FlowLayout(spacing: 6) {
+            Menu {
+                ForEach(TaskStatus.allCases, id: \.self) { s in Button(s.label) { store.setStatus(task, s) } }
+            } label: { StatusPill(status: task.status) }
+            .compactMenu()
+
+            Menu {
+                ForEach(TaskKind.allCases, id: \.self) { k in
+                    Button { store.update(task, ["kind": k.rawValue]) { $0.kind = k } } label: { Label(k.label, systemImage: k.symbol) }
+                }
+            } label: { chip(task.kind.symbol, task.kind.label) }
+            .compactMenu()
+
+            Menu {
+                ForEach(Priority.allCases, id: \.self) { p in Button(p.label) { store.update(task, ["priority": p.rawValue]) { $0.priority = p.rawValue } } }
+            } label: { chip("chart.bar.fill", task.priorityLevel == .none ? "Priority" : task.priorityLevel.label) }
+            .compactMenu()
+
+            if let team = store.team(task.teamId) { chip(team.symbol, [team.name, task.project].compactMap { $0 }.joined(separator: " › ")) }
+            if let day = task.scheduledOn { chip("calendar", Day.shortTitle(day)) }
+            if let due = task.due { chip("flag", "Due \(Day.shortTitle(due))") }
+
+            Button { store.section = .board; store.open(task.id) } label: { chip("arrow.up.left.and.arrow.down.right", "Open full page") }
+                .buttonStyle(.plain)
+        }
+    }
+
+    private func chip(_ icon: String, _ text: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(text).lineLimit(1)
+        }
+        .font(.caption)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(Color.secondary.opacity(0.1), in: Capsule())
+        .fixedSize()
+    }
+}
+
+private extension View {
+    func compactMenu() -> some View { menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize() }
 }
 
 /// Right-hand properties column.

@@ -132,6 +132,12 @@ struct BoardAPI {
                               body: ["task_id": taskId, "kind": kind, "body": body, "actor": "me"])
     }
 
+    func markUnread(ids: [Int]) async throws {
+        guard !ids.isEmpty else { return }
+        let list = ids.map(String.init).joined(separator: ",")
+        _ = try await request("notifications?id=in.(\(list))", method: "PATCH", body: ["read_at": NSNull()])
+    }
+
     func markRead(ids: [Int]) async throws {
         guard !ids.isEmpty else { return }
         let list = ids.map(String.init).joined(separator: ",")
