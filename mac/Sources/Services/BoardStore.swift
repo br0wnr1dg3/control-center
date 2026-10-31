@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -17,7 +18,10 @@ final class BoardStore {
     private(set) var teams: [Team] = []
     private(set) var projectSpecs: [ProjectSpec] = []
     private(set) var localRepos: [LocalRepo] = []
-    private(set) var inbox: [InboxItem] = []
+    private(set) var inbox: [InboxItem] = [] {
+        // The Dock icon carries the unread count, so something waiting shows even with the window closed.
+        didSet { NSApp?.dockTile.badgeLabel = unreadCount > 0 ? "\(unreadCount)" : nil }
+    }
     private(set) var lastError: String?
     private(set) var lastRefresh: Date?
 

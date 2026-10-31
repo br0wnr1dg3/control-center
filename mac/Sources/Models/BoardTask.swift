@@ -295,9 +295,9 @@ struct InboxItem: Codable, Identifiable, Equatable {
 
 extension String {
     /// "3m", "2h", "Oct 29" style relative time for a Postgres timestamp.
-    var relativeTime: String {
+    func relativeTime(now: Date = Date()) -> String {
         guard let date = Day.parseTimestamp(self) else { return "" }
-        let seconds = Date().timeIntervalSince(date)
+        let seconds = now.timeIntervalSince(date)
         if seconds < 60 { return "now" }
         if seconds < 3600 { return "\(Int(seconds / 60))m" }
         if seconds < 86400 { return "\(Int(seconds / 3600))h" }

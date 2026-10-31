@@ -159,7 +159,7 @@ struct InboxThreadRow: View {
                         .fontWeight(thread.isUnread ? .semibold : .regular)
                         .lineLimit(1)
                     Spacer(minLength: 4)
-                    Text(item.createdAt.relativeTime).font(.caption).foregroundStyle(.tertiary).fixedSize()
+                    RelativeTime(timestamp: item.createdAt).font(.caption).foregroundStyle(.tertiary).fixedSize()
                 }
                 HStack(spacing: 4) {
                     Text(answered ? "Answered" : item.headline).foregroundStyle(color)

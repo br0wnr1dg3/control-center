@@ -334,3 +334,15 @@ struct SectionHeader: View {
         }
     }
 }
+
+/// A relative timestamp ("now", "5m", "2h") that keeps itself current. Plain text would freeze at
+/// whatever it said when the view last rendered, so a row from last night could still read "now".
+struct RelativeTime: View {
+    let timestamp: String
+
+    var body: some View {
+        TimelineView(.everyMinute) { context in
+            Text(timestamp.relativeTime(now: context.date))
+        }
+    }
+}

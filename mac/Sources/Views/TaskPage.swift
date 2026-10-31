@@ -211,7 +211,7 @@ struct TaskPage: View {
                     HStack(spacing: 8) {
                         Circle().fill(Color.secondary.opacity(0.4)).frame(width: 5, height: 5).frame(width: 22)
                         Text("\(e.actor ?? "system") \(describe(e))").foregroundStyle(.secondary)
-                        Text(e.createdAt.relativeTime).foregroundStyle(.tertiary)
+                        RelativeTime(timestamp: e.createdAt).foregroundStyle(.tertiary)
                     }
                     .font(.caption)
                 }
@@ -404,7 +404,7 @@ struct CommentBubble: View {
                     if let time = comment.timecodeLabel {
                         Text(time).font(.caption.monospacedDigit()).foregroundStyle(Color.accentColor)
                     }
-                    Text(comment.createdAt.relativeTime).font(.caption).foregroundStyle(.tertiary)
+                    RelativeTime(timestamp: comment.createdAt).font(.caption).foregroundStyle(.tertiary)
                 }
                 HStack(alignment: .top, spacing: 10) {
                     if let still = comment.stillUrl.flatMap(URL.init(string:)) {
