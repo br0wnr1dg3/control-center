@@ -29,6 +29,7 @@ const CONFIG = {
   closeAfterMinutes: Number(process.env.CC_CLOSE_AFTER_MINUTES ?? 5),
   cleanupEveryMinutes: Number(process.env.CC_CLEANUP_MINUTES ?? 10),
   repoSyncMinutes: Number(process.env.CC_REPO_SYNC_MINUTES ?? 10),
+  updateMinutes: Number(process.env.CC_UPDATE_MINUTES ?? 10),
 };
 const TASKS_DIR = join(CONFIG.home, "tasks");
 // Whose board this is, as agent prompts name them (CC_OWNER_NAME; neutral when unset).
@@ -499,6 +500,63 @@ async function cleanupWorktrees(workspaces) {
   }
 }
 
+// ---------- Self-update ----------
+
+// The checkout this runner runs from. Merges to main reach every runner machine through it, so a
+// machine never needs a manual pull.
+const CHECKOUT = dirname(dirname(fileURLToPath(import.meta.url)));
+const LAUNCHD_LABEL = "com.brownridge.control-center.runner";
+
+// Fast-forward the checkout to origin/main when that is all it takes: on main, no local edits to
+// tracked files, nothing local that isn't on origin. Anything else is someone's work, so leave it.
+// Untracked files don't count (agent worktrees live under .claude/worktrees). Returns
+// { from, to, restart } after an update, { skipped } when it can't, or null when already current.
+// restart says whether runner code changed; hooks and bin/ are read fresh on every use.
+export async function selfUpdate(repo = CHECKOUT) {
+  if ((await tryGit(repo, "fetch", "--quiet", "origin", "main")) === null) return { skipped: "git fetch failed" };
+  const branch = await git(repo, "rev-parse", "--abbrev-ref", "HEAD");
+  if (branch !== "main") return { skipped: `checkout is on ${branch}, not main` };
+  if (await git(repo, "status", "--porcelain", "--untracked-files=no")) return { skipped: "checkout has local changes" };
+  if (Number(await git(repo, "rev-list", "--count", "origin/main..HEAD")) > 0) return { skipped: "main has commits not on origin" };
+  if (Number(await git(repo, "rev-list", "--count", "HEAD..origin/main")) === 0) return null;
+
+  const from = await git(repo, "rev-parse", "--short", "HEAD");
+  const changed = (await git(repo, "diff", "--name-only", "HEAD", "origin/main", "--", "runner")).split("\n");
+  await git(repo, "merge", "--ff-only", "--quiet", "origin/main");
+  const to = await git(repo, "rev-parse", "--short", "HEAD");
+  return { from, to, restart: changed.some((f) => /^runner\/[^/]+\.mjs$/.test(f)) };
+}
+
+let lastUpdateCheck = 0;
+let lastUpdateSkip = null;
+
+// True when the runner should exit so launchd (KeepAlive) starts it again on the new code. That's safe
+// mid-session: task state lives in the database and sessions in cmux, not in this process.
+async function updateDue() {
+  if (Date.now() - lastUpdateCheck < CONFIG.updateMinutes * 60000) return false;
+  lastUpdateCheck = Date.now();
+  const result = await selfUpdate();
+  if (result?.skipped) {
+    // Say why once, not every check.
+    if (result.skipped !== lastUpdateSkip) log(`self-update skipped: ${result.skipped}`);
+    lastUpdateSkip = result.skipped;
+    return false;
+  }
+  lastUpdateSkip = null;
+  if (!result) return false;
+  if (!result.restart) {
+    log(`updated ${result.from} → ${result.to}`);
+    return false;
+  }
+  // Started by hand rather than by launchd: exiting would just stop it.
+  if (process.env.XPC_SERVICE_NAME !== LAUNCHD_LABEL) {
+    log(`updated ${result.from} → ${result.to}; restart the runner to use it`);
+    return false;
+  }
+  log(`updated ${result.from} → ${result.to}, restarting`);
+  return true;
+}
+
 // ---------- Main loop ----------
 
 async function tick() {
@@ -579,6 +637,7 @@ async function main() {
     } catch (err) {
       log("tick failed:", err.message);
     }
+    if (!once && (await updateDue().catch((err) => (log("self-update:", err.message), false)))) process.exit(0);
     if (!once) await new Promise((r) => setTimeout(r, CONFIG.pollSeconds * 1000));
   } while (!once);
 }

@@ -96,6 +96,7 @@ Polls every 20s. Only tasks with `kind = agent` **and** `status = ready` are sta
 - **Closing:** a done task's window closes after `CC_CLOSE_AFTER_MINUTES` (5); cancelled closes at once. Every `CC_CLEANUP_MINUTES` (10) the runner removes worktrees of finished tasks, but only when clean and either adding no commits or with a merged PR and nothing unpushed: `git worktree remove`, `git branch -d` (never `-D`), `git worktree prune`, one step at a time. Otherwise it keeps the worktree and logs why on the task.
 - **Session hooks** (`runner/hooks/session-state.mjs`, passed with `--settings`): when a session stops or sits waiting for input, an in-progress task moves to `needs_you` with the agent's last message, so it reaches the inbox however the agent asked; typing into the session moves it back to `in_progress`.
 - At most 2 tasks run at once.
+- **Self-update:** every `CC_UPDATE_MINUTES` (10) the runner fast-forwards its own checkout to `origin/main`, so a push to `main` reaches every runner machine. It only does so on a clean `main` with nothing unpushed; otherwise it logs why once and leaves the checkout alone. Hook changes apply at once; if `runner/*.mjs` changed, it exits and launchd restarts it on the new code (running sessions are unaffected).
 
 ```bash
 node runner/runner.mjs --once     # single pass
@@ -105,7 +106,7 @@ runner/install.sh uninstall
 
 New machine: `node runner/clone-repos.mjs` clones every repo on the board into the same folders (the runner's published inventory, minus hidden ones), so agents find the same paths everywhere. `CC_MAX_CONCURRENT=<n>` on `install.sh` sets how many agents run at once.
 
-Requires: cmux, `claude` signed in to the control-center MCP (`/mcp`), service key in Keychain (`control-center service key`). Env overrides: `CC_MAX_CONCURRENT`, `CC_POLL_SECONDS`, `CC_CLOSE_AFTER_MINUTES`, `CC_CLEANUP_MINUTES`. Needs `git` and `gh` (signed in) for worktree cleanup.
+Requires: cmux, `claude` signed in to the control-center MCP (`/mcp`), service key in Keychain (`control-center service key`). Env overrides: `CC_MAX_CONCURRENT`, `CC_POLL_SECONDS`, `CC_CLOSE_AFTER_MINUTES`, `CC_CLEANUP_MINUTES`, `CC_REPO_SYNC_MINUTES`, `CC_UPDATE_MINUTES`. Needs `git` and `gh` (signed in) for worktree cleanup.
 
 ## Mac app (`mac/`)
 
