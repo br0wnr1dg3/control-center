@@ -13,7 +13,7 @@ Production is deployed from this machine, not from GitHub, and the runner execut
 
 1. Work on a branch or in a worktree. Test locally (below), never against production.
 2. Merge to `main`, then deploy from `main`.
-3. After merging runner changes, restart the runner (and `git pull` + restart on any other runner machine).
+3. Push `main`: every runner fast-forwards its own checkout to `origin/main` within 10 minutes and restarts itself if runner code changed. So anything pushed to `main` is live on the runner machines; merge only what you'd deploy. A runner checkout that isn't a clean `main` is left alone (the log says why).
 
 ### Local testing
 
@@ -26,7 +26,7 @@ Production is deployed from this machine, not from GitHub, and the runner execut
 
 - Migrations: `SUPABASE_DB_PASSWORD=$(security find-generic-password -s "supabase-db control-center" -w) supabase db push`
 - Worker: `cd mcp && npx wrangler deploy`. Secrets via `wrangler secret put` (a var and a secret can't share a name).
-- Runner: `launchctl kickstart -k gui/$(id -u)/com.brownridge.control-center.runner` (reinstall with `CC_OWNER_NAME=… CC_MAX_CONCURRENT=… runner/install.sh` if its env changes). Log: `~/Developer/ControlCenter/runner.log`.
+- Runner: updates itself from `origin/main` (above); to restart it now, `launchctl kickstart -k gui/$(id -u)/com.brownridge.control-center.runner` (reinstall with `CC_OWNER_NAME=… CC_MAX_CONCURRENT=… runner/install.sh` if its env changes). Log: `~/Developer/ControlCenter/runner.log`.
 - App: `cd mac && ./bundle.sh install` (rebuilds, installs to /Applications, relaunches).
 
 ## Conventions
