@@ -115,8 +115,31 @@ final class BoardStore {
         if env["CC_COMPOSE"] != nil { composer = defaults(TaskDraft(kind: .agent, scheduledOn: Day.adding(3, to: Day.today))) }
         Task { await refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { _ in
-            Task { @MainActor in await BoardStore.shared.refresh() }
+            Task { @MainActor in
+                BoardStore.shared.followToday()
+                await BoardStore.shared.refresh()
+            }
         }
+        // The timer doesn't fire while the Mac sleeps, so catch midnight and waking up straight away too.
+        for name in [Notification.Name.NSCalendarDayChanged, NSWorkspace.didWakeNotification] {
+            let center = name == NSWorkspace.didWakeNotification ? NSWorkspace.shared.notificationCenter : NotificationCenter.default
+            center.addObserver(forName: name, object: nil, queue: .main) { _ in
+                Task { @MainActor in BoardStore.shared.followToday() }
+            }
+        }
+    }
+
+    /// The day `day` and `weekStart` were last kept in step with.
+    @ObservationIgnored private var knownToday = Day.today
+
+    /// The app stays open for days: when the date changes, Today and Upcoming move with it, unless
+    /// you'd browsed to another day or week, which stays put.
+    func followToday() {
+        let now = Day.today
+        guard now != knownToday else { return }
+        if day == knownToday { day = now }
+        if weekStart == Day.weekStart(knownToday) { weekStart = Day.weekStart(now) }
+        knownToday = now
     }
 
     private func client() throws -> BoardAPI {
