@@ -14,14 +14,13 @@ final class BoardStore {
     static let shared = BoardStore()
 
     /// Every task loaded; views use `tasks`, which honours the team filter.
-    private(set) var allTasks: [BoardTask] = []
+    // The Dock icon carries what needs you (unread, or an agent still waiting), so it shows even with the
+    // window closed. Task statuses change it too: answering elsewhere takes a task out of Needs you.
+    private(set) var allTasks: [BoardTask] = [] { didSet { updateDockBadge() } }
     private(set) var teams: [Team] = []
     private(set) var projectSpecs: [ProjectSpec] = []
     private(set) var localRepos: [LocalRepo] = []
-    private(set) var inbox: [InboxItem] = [] {
-        // The Dock icon carries the unread count, so something waiting shows even with the window closed.
-        didSet { NSApp?.dockTile.badgeLabel = unreadCount > 0 ? "\(unreadCount)" : nil }
-    }
+    private(set) var inbox: [InboxItem] = [] { didSet { updateDockBadge() } }
     private(set) var lastError: String?
     private(set) var lastRefresh: Date?
 
@@ -62,6 +61,12 @@ final class BoardStore {
     var selectedTask: BoardTask? { selectedTaskId.flatMap(task) }
     /// Unread inbox rows (tasks with something new), as the sidebar and menu bar count them.
     var unreadCount: Int { inboxThreads.filter(\.isUnread).count }
+    /// What the badges show: unread threads plus agents still waiting on you after you've read them.
+    var attentionCount: Int { inboxThreads.filter(\.needsAttention).count }
+
+    private func updateDockBadge() {
+        NSApp?.dockTile.badgeLabel = attentionCount > 0 ? "\(attentionCount)" : nil
+    }
     /// Questions from any team: they block agents, so they show whichever team is in view.
     var needsYou: [BoardTask] { allTasks.filter { $0.status == .needs_you } }
     var running: [BoardTask] { tasks.filter { $0.status == .in_progress && $0.kind == .agent } }
@@ -452,10 +457,22 @@ final class BoardStore {
     }
 
     /// Inbox items grouped one row per task, newest activity first (Linear-style).
+    /// Agents waiting on you first (they're blocked), then newest first. A question that's been read is
+    /// still unanswered, so waiting comes from the task's live status, not the notification's read state.
     var inboxThreads: [InboxThread] {
-        Dictionary(grouping: inbox, by: \.task.id)
-            .map { InboxThread(items: $0.value.sorted { $0.createdAt > $1.createdAt }) }
-            .sorted { $0.latest.createdAt > $1.latest.createdAt }
+        let waiting = Set(needsYou.map(\.id))
+        var threads = Dictionary(grouping: inbox, by: \.task.id)
+            .map { InboxThread(items: $0.value.sorted { $0.createdAt > $1.createdAt }, waiting: waiting.contains($0.key)) }
+        // A waiting task with no notification loaded (older than the inbox's window, or made straight into
+        // Needs you) still belongs here, so the inbox and the "waiting on you" banner always agree.
+        let shown = Set(threads.map(\.id))
+        for task in needsYou where !shown.contains(task.id) {
+            let standIn = InboxItem(id: -task.id, kind: "question", body: task.question ?? "Waiting on you.",
+                                     readAt: task.updatedAt ?? "", createdAt: task.updatedAt ?? "",
+                                     task: .init(id: task.id, title: task.title, status: task.status))
+            threads.append(InboxThread(items: [standIn], waiting: true))
+        }
+        return threads.sorted { ($0.waiting ? 1 : 0, $0.latest.createdAt) > ($1.waiting ? 1 : 0, $1.latest.createdAt) }
     }
 
     /// Archive = read: it leaves the Unread view.

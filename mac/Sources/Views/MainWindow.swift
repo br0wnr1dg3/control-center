@@ -7,7 +7,7 @@ struct MainWindow: View {
         NavigationSplitView {
             List(selection: Binding(get: { store.section }, set: { if let s = $0 { store.section = s; store.selectedTaskId = nil } })) {
                 Label("Inbox", systemImage: "tray")
-                    .badge(store.unreadCount)
+                    .badge(store.attentionCount)
                     .tag(Section.inbox)
                 Label("Today", systemImage: "sun.max")
                     .badge(store.onYourPlate.count)
