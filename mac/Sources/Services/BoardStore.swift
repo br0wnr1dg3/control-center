@@ -265,9 +265,9 @@ final class BoardStore {
         update(task, ["scheduled_on": day ?? NSNull()]) { $0.scheduledOn = day }
     }
 
-    func answer(_ task: BoardTask, with text: String) {
+    func answer(_ task: BoardTask, with text: String, images: [PendingImage] = []) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty || !images.isEmpty else { return }
         // Keep the question in the history: questions caught from a session aren't comments yet.
         let question = task.question?.trimmingCharacters(in: .whitespacesAndNewlines)
         let alreadyPosted = selectedTaskId == task.id && comments.contains { $0.author == "agent" && $0.body == question }
@@ -275,7 +275,7 @@ final class BoardStore {
             if let question, !question.isEmpty, !alreadyPosted {
                 try await api.addComment(task.id, body: question, author: "agent")
             }
-            try await api.addComment(task.id, body: text)
+            try await api.addComment(task.id, body: text, attachments: try await Self.upload(images, to: task.id, with: api))
             try await api.update(task.id, ["status": "ready", "question": NSNull()], onlyIfStatus: .needs_you)
         }
     }
@@ -287,12 +287,45 @@ final class BoardStore {
         }
     }
 
-    func comment(on task: BoardTask, _ text: String) {
-        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+    /// Images go up before the comment row, so the runner never sees a comment whose files aren't there yet.
+    private static func upload(_ images: [PendingImage], to taskId: Int, with api: BoardAPI) async throws -> [CommentAttachment] {
+        var stored: [CommentAttachment] = []
+        for image in images { stored.append(try await api.uploadImage(image, taskId: taskId)) }
+        return stored
+    }
+
+    @ObservationIgnored private var imageCache: [String: NSImage] = [:]
+
+    /// A comment's image, fetched with the service key (the bucket is private) and kept for the session.
+    func image(at path: String) async -> NSImage? {
+        if let cached = imageCache[path] { return cached }
+        guard let data = try? await client().downloadImage(path), let image = NSImage(data: data) else { return nil }
+        imageCache[path] = image
+        return image
+    }
+
+    /// Full size in the default viewer (Preview), from a temporary copy.
+    func openImage(_ attachment: CommentAttachment) {
         Task {
             do {
-                try await client().addComment(task.id, body: text)
+                let data = try await client().downloadImage(attachment.path)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("cc-\(attachment.path.replacingOccurrences(of: "/", with: "-"))")
+                try data.write(to: url)
+                NSWorkspace.shared.open(url)
+            } catch {
+                lastError = error.localizedDescription
+            }
+        }
+    }
+
+    func comment(on task: BoardTask, _ text: String, images: [PendingImage] = []) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !images.isEmpty else { return }
+        Task {
+            do {
+                let api = try client()
+                try await api.addComment(task.id, body: text, attachments: try await Self.upload(images, to: task.id, with: api))
             } catch {
                 lastError = error.localizedDescription
             }

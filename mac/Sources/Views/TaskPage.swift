@@ -9,6 +9,7 @@ struct TaskPage: View {
 
     @State private var title = ""
     @State private var comment = ""
+    @State private var images: [PendingImage] = []
     @State private var newSubtask = ""
     @FocusState private var editingTitle: Bool
     @State private var scroller: ScrollViewProxy?
@@ -221,17 +222,30 @@ struct TaskPage: View {
 
     private var composer: some View {
         VStack(alignment: .trailing, spacing: 8) {
-            TextField(task.kind == .agent && task.status == .in_progress
-                      ? "Comment — goes straight to the running agent…" : "Leave a comment… (@agent hands it to an agent)",
-                      text: $comment, axis: .vertical)
-                .textFieldStyle(.plain)
-                .lineLimit(3...10)
-                .padding(10)
-                .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
-            Button("Comment", action: sendComment)
-                .keyboardShortcut(.return, modifiers: .command)
-                .disabled(comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack(alignment: .topLeading) {
+                    if comment.isEmpty {
+                        Text(task.kind == .agent && task.status == .in_progress
+                             ? "Comment — goes straight to the running agent…" : "Leave a comment… (@agent hands it to an agent)")
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                    ComposerTextView(text: $comment, fontSize: 13) { images.append(contentsOf: $0) }
+                        .frame(minHeight: 54, maxHeight: 180)
+                }
+                PendingImagesStrip(images: $images)
+            }
+            .padding(10)
+            .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
+            HStack {
+                AttachImagesButton { images.append(contentsOf: $0) }
+                Spacer()
+                Button("Comment", action: sendComment)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty)
+            }
         }
     }
 
@@ -254,8 +268,9 @@ struct TaskPage: View {
     }
 
     private func sendComment() {
-        store.comment(on: task, comment)
+        store.comment(on: task, comment, images: images)
         comment = ""
+        images = []
     }
 }
 
@@ -266,6 +281,7 @@ struct ReplyCard: View {
     var store = BoardStore.shared
     @State private var picked: [Int: Set<String>] = [:]
     @State private var text = ""
+    @State private var images: [PendingImage] = []
 
     private var questions: [AgentQuestion] { task.questionOptions ?? [] }
 
@@ -304,36 +320,38 @@ struct ReplyCard: View {
                 }
             }
 
-            ZStack(alignment: .topLeading) {
-                if text.isEmpty {
-                    Text(questions.isEmpty ? "Reply to the agent…" : "Add detail, or answer something else…")
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, 5)
-                        .padding(.top, 1)
-                        .allowsHitTesting(false)
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text(questions.isEmpty ? "Reply to the agent… (paste or drop screenshots)" : "Add detail, or answer something else…")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                    ComposerTextView(text: $text, fontSize: 14) { images.append(contentsOf: $0) }
+                        .frame(minHeight: 90, maxHeight: 260)
                 }
-                TextEditor(text: $text)
-                    .font(.system(size: 14))
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 90)
+                PendingImagesStrip(images: $images)
             }
             .padding(10)
             .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.35)))
 
             HStack {
+                AttachImagesButton { images.append(contentsOf: $0) }
                 Text("⌘↩ sends · goes straight into the agent's session").font(.caption).foregroundStyle(.tertiary)
                 Spacer()
                 Button("Send reply", action: send)
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(answer.isEmpty)
+                    .disabled(answer.isEmpty && images.isEmpty)
             }
         }
         .padding(16)
         .background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.4)))
-        .onChange(of: task.id) { _, _ in picked = [:]; text = "" }
+        .onChange(of: task.id) { _, _ in picked = [:]; text = ""; images = [] }
     }
 
     private func choice(_ option: AgentQuestion.Option, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -374,10 +392,11 @@ struct ReplyCard: View {
 
     private func send() {
         let reply = answer
-        guard !reply.isEmpty else { return }
-        store.answer(task, with: reply)
+        guard !reply.isEmpty || !images.isEmpty else { return }
+        store.answer(task, with: reply, images: images)
         picked = [:]
         text = ""
+        images = []
     }
 }
 
@@ -417,7 +436,10 @@ struct CommentBubble: View {
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                         .onTapGesture { NSWorkspace.shared.open(still) }
                     }
-                    MarkdownView(text: comment.body, size: 13, selectable: true)
+                    if !comment.body.isEmpty { MarkdownView(text: comment.body, size: 13, selectable: true) }
+                }
+                if let attachments = comment.attachments, !attachments.isEmpty {
+                    CommentImages(attachments: attachments)
                 }
             }
             Spacer(minLength: 0)

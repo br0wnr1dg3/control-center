@@ -104,7 +104,7 @@ struct BoardAPI {
     }
 
     func fetchComments(_ taskId: Int) async throws -> [TaskComment] {
-        try await get("task_comments?task_id=eq.\(taskId)&select=id,author,author_name,body,timecode,still_url,created_at&order=created_at")
+        try await get("task_comments?task_id=eq.\(taskId)&select=id,author,author_name,body,timecode,still_url,attachments,created_at&order=created_at")
     }
 
     func fetchActivity(_ taskId: Int) async throws -> [ActivityEvent] {
@@ -123,8 +123,37 @@ struct BoardAPI {
         _ = try await request(path, method: "PATCH", body: fields)
     }
 
-    func addComment(_ taskId: Int, body: String, author: String = "me") async throws {
-        _ = try await request("task_comments", method: "POST", body: ["task_id": taskId, "author": author, "body": body])
+    func addComment(_ taskId: Int, body: String, author: String = "me", attachments: [CommentAttachment] = []) async throws {
+        var fields: [String: Any] = ["task_id": taskId, "author": author, "body": body]
+        if !attachments.isEmpty { fields["attachments"] = attachments.map(\.json) }
+        _ = try await request("task_comments", method: "POST", body: fields)
+    }
+
+    // ---------- Comment images (private Storage bucket) ----------
+
+    private static let storageURL = URL(string: "../../storage/v1/object/comment-attachments/", relativeTo: baseURL)!.absoluteURL
+
+    private func storage(_ path: String, method: String = "GET", body: Data? = nil, type: String? = nil) async throws -> Data {
+        var req = URLRequest(url: Self.storageURL.appendingPathComponent(path))
+        req.httpMethod = method
+        req.setValue(key, forHTTPHeaderField: "apikey")
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        if let type { req.setValue(type, forHTTPHeaderField: "Content-Type") }
+        req.httpBody = body
+        let (data, response) = try await URLSession.shared.data(for: req)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else { throw APIError.http(code, String(decoding: data, as: UTF8.self)) }
+        return data
+    }
+
+    func uploadImage(_ image: PendingImage, taskId: Int) async throws -> CommentAttachment {
+        let path = "\(taskId)/\(UUID().uuidString.lowercased()).\(image.ext)"
+        _ = try await storage(path, method: "POST", body: image.data, type: image.type)
+        return CommentAttachment(path: path, name: image.name, type: image.type)
+    }
+
+    func downloadImage(_ path: String) async throws -> Data {
+        try await storage(path)
     }
 
     func addEvent(_ taskId: Int, kind: String, body: String) async throws {
