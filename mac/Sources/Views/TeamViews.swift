@@ -335,6 +335,15 @@ struct ProjectSpecCard: View {
                     RepoListEditor(repos: spec.repos) { repos in
                         store.updateProject(spec, ["repos": repos.map(\.json)]) { $0.repos = repos }
                     }
+                    Picker("Agents' PRs", selection: Binding(
+                        get: { spec.prReview ?? "owner" },
+                        set: { value in store.updateProject(spec, ["pr_review": value]) { $0.prReview = value } }
+                    )) {
+                        Text("I review and merge").tag("owner")
+                        Text("A review agent merges when CI is green").tag("agent")
+                    }
+                    .fixedSize()
+                    .help("With a review agent, a fresh session runs /code-review on each PR, fixes what it finds and merges once CI passes; it asks you only when a finding needs your call.")
                 }
                 .padding(.leading, 22)
             } else if let description = spec.description, !description.isEmpty {

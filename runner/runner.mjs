@@ -251,6 +251,29 @@ export async function createWorktree(repo, task, base) {
 const formatRepos = (repos) =>
   repos.map((r) => `- ${r.name}${r.url ? ` (${r.url})` : ""}${r.path ? ` checked out at ${r.path}` : ""}`).join("\n");
 
+// How a session in a repo gets its work merged. By default the owner reviews and merges every PR; a
+// project with pr_review = 'agent' has a second, fresh session review it (so it isn't marking its own
+// homework) and merge once CI is green. That review session is a task labelled pr-review.
+export function codeChanges(task, repo, project) {
+  const id = task.id;
+  if (task.labels?.includes("pr-review")) {
+    return `- This task is a PR review: review the pull request named in the title and description, fix what's clearly wrong, and merge it once CI is green. You didn't write it; judge it on its merits.
+  1. \`gh pr view <n> --json number,title,url,state,headRefName,baseRefName,body\`. If it's already merged or closed, complete_task saying so and stop.
+  2. Check out its head without taking the branch (the author's worktree may still have it): \`git fetch origin <headRefName> && git switch --detach FETCH_HEAD\`.
+  3. Review it with the code-review skill: use the Skill tool with skill "code-review" and args "high <n>".
+  4. Fix findings that are clearly right and within the PR's scope, commit, and push to the PR with \`git push origin HEAD:<headRefName>\`. Comment on the PR (\`gh pr comment\`) with what you found and changed.
+  5. If a finding needs ${OWNER}'s judgment (product behaviour, a big rework, anything you're unsure is a bug), don't merge: ask_human with the finding and options (fix it a given way / merge as is / close).
+  6. Wait for CI: \`gh pr checks <n> --watch\`. If a check fails because of this PR and the fix is clear, fix and push, then wait again; otherwise ask_human. If the repo has no checks, run its tests and build yourself and only continue if they pass.
+  7. Merge with \`gh pr merge <n> --squash\` (or the method the repo allows). Never use --admin or bypass branch protection; if protection needs a human approval, hand it over with add_human_task(parent_id=${id}, title="Approve and merge PR #<n>: ...").
+  8. complete_task with what the review found, what you fixed, and the merge commit.`;
+  }
+  const open = `commit to this branch, push it with \`git push -u origin HEAD\`, open a PR against ${repo.base} (\`gh pr create --base ${repo.base}\`), attach the PR with add_links`;
+  if (project?.pr_review === "agent") {
+    return `- Code changes: ${open}, then queue its review: add_task(title="Review and merge PR #<n>: <PR title>", kind="agent", ready=true, parent_id=${id}, project="${project.name}", repo="${repo.path}", labels=["pr-review"], source="agent", description="<PR url, what it changes, how you tested it, anything the reviewer should look at>"). A fresh session reviews it with /code-review and merges it once CI is green, so don't merge it yourself. Then finish this task. The runner removes this worktree once the PR is merged.`;
+  }
+  return `- Code changes: ${open}, then hand review to ${OWNER} with add_human_task(parent_id=${id}, title="Review and merge PR #<n>: ..."). Never merge it yourself unless ${OWNER} explicitly asks you to in this task. The runner removes this worktree once the PR is merged.`;
+}
+
 function taskPrompt(task, sessionId, dir, comments, activity, team, project, repo, folder) {
   const id = task.id;
   const repos = [...(project?.repos ?? []), ...(team?.repos ?? [])];
@@ -283,10 +306,7 @@ How to work:
           ? `You are in ${team.name}'s working folder ${folder.path}${folder.repos.length ? `, which holds these repos:\n${folder.repos.map((r) => `  - ${r.name}${r.description ? `: ${r.description}` : ""}`).join("\n")}\n` : ""}. Save notes and drafts in ${dir}. If you change code in a repo, don't edit its main checkout (other work may be using it): make a worktree with \`git -C <repo> worktree add .claude/worktrees/${worktreeName(task)} -b worktree-${worktreeName(task)}\`, work there, and record it with update_task(id=${id}, worktree="<full path>") so the runner can clean it up. If it's clear which repo this task is about, also set update_task(id=${id}, repo="<name>") so future sessions start in it.`
           : `Your working directory is ${dir}; save drafts and outputs here.`
     } Attach important outputs with update_task(id=${id}, add_links=[{title, url: "file://..."}]).${
-      repo
-        ? `
-- Code changes: commit to this branch, push it with \`git push -u origin HEAD\`, open a PR against ${repo.base} (\`gh pr create --base ${repo.base}\`), attach the PR with add_links, then hand review to ${OWNER} with add_human_task(parent_id=${id}, title="Review and merge PR #<n>: ..."). Never merge it yourself unless ${OWNER} explicitly asks you to in this task. The runner removes this worktree once the PR is merged.`
-        : ""
+      repo ? `\n${codeChanges(task, repo, project)}` : ""
     }
 - Use the control-center MCP tools. Write comments and hand-off instructions in Markdown. Log progress with update_task(id=${id}, log=...). Post anything ${OWNER} should read (a draft, a finding, a decision you made) with add_comment(id=${id}, body, author="agent"); it lands in his inbox.
 - If you need a decision or information from ${OWNER}: call ask_human(id=${id}, question, session_id="${sessionId}"), with options=[{label, description}] when it's a choice, then ask the same question here and wait. Don't use the AskUserQuestion picker: ${OWNER} usually answers from the board, where it doesn't show. He may answer here, or on the board, in which case it's typed in here as "${OWNER} on the board: ...". Once answered, call update_task(id=${id}, status="in_progress").
@@ -308,7 +328,7 @@ async function launch(task, { resume = false } = {}) {
 
   const [[team], [project]] = await Promise.all([
     task.team_id ? db(`teams?id=eq.${task.team_id}&select=name,context,repos,workdir,github,base_branch`) : [],
-    task.project ? db(`projects?name=ilike.${encodeURIComponent(task.project)}&select=name,description,repos`) : [],
+    task.project ? db(`projects?name=ilike.${encodeURIComponent(task.project)}&select=name,description,repos,pr_review`) : [],
   ]);
   const synced = task.team_id
     ? await db(`repos?team_id=eq.${task.team_id}&select=name,path,description,aliases,base_branch,hidden&order=name`)
