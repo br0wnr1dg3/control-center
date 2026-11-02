@@ -604,7 +604,7 @@ export function buildServer(env: Env) {
           .optional()
           .describe(
             `Who takes agents' PRs to merged: 'owner' (${o} gets a review-and-merge task; default) or 'agent' ` +
-              "(a fresh agent session reviews with /code-review, fixes, and merges once CI is green)",
+              "(a fresh agent session waits for the repo's AI review pipeline, or runs /code-review where there is none, fixes what's left, and merges once CI is green)",
           ),
       }),
     },

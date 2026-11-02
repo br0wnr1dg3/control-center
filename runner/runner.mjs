@@ -256,20 +256,25 @@ const formatRepos = (repos) =>
 // homework) and merge once CI is green. That review session is a task labelled pr-review.
 export function codeChanges(task, repo, project) {
   const id = task.id;
+  // Repos with the ai-review + bugbot-auto-triage workflows already review every PR and push fixes; a
+  // second reviewer would duplicate it, race its pushes and restart its rounds. There the session only
+  // waits for that pipeline, finishes what it left, and merges.
   if (task.labels?.includes("pr-review")) {
-    return `- This task is a PR review: review the pull request named in the title and description, fix what's clearly wrong, and merge it once CI is green. You didn't write it; judge it on its merits.
+    return `- This task takes a pull request to merged: the one named in the title and description. You didn't write it; judge it on its merits.
   1. \`gh pr view <n> --json number,title,url,state,headRefName,baseRefName,body\`. If it's already merged or closed, complete_task saying so and stop.
   2. Check out its head without taking the branch (the author's worktree may still have it): \`git fetch origin <headRefName> && git switch --detach FETCH_HEAD\`.
-  3. Review it with the code-review skill: use the Skill tool with skill "code-review" and args "high <n>".
-  4. Fix findings that are clearly right and within the PR's scope, commit, and push to the PR with \`git push origin HEAD:<headRefName>\`. Comment on the PR (\`gh pr comment\`) with what you found and changed.
+  3. Find out whether the repo reviews its own PRs: does \`.github/workflows/ai-review.yml\` or \`bugbot-auto-triage.yml\` exist?
+     - Yes (the AI review pipeline): don't run your own review and don't push while it's working. Wait until its checks, including \`triage-gate\`, have finished: \`gh pr checks <n> --watch\`, then run it again after a minute, since the bot's fix commits start new rounds; it's settled when a re-check shows nothing pending. Then read what it left: \`gh pr view <n> --comments\` and any unresolved review threads. A finding still open (not fixed, not marked False Positive / Not a Bug) is yours to deal with as in step 4.
+     - No: review it yourself with the code-review skill: the Skill tool with skill "code-review" and args "high <n>".
+  4. Fix findings that are clearly right and within the PR's scope, commit, and push to the PR with \`git push origin HEAD:<headRefName>\` (fetch and rebase onto it first if it moved; never force-push). Comment on the PR (\`gh pr comment\`) with what you found and changed. After pushing in a pipeline repo, wait for it to settle again.
   5. If a finding needs ${OWNER}'s judgment (product behaviour, a big rework, anything you're unsure is a bug), don't merge: ask_human with the finding and options (fix it a given way / merge as is / close).
-  6. Wait for CI: \`gh pr checks <n> --watch\`. If a check fails because of this PR and the fix is clear, fix and push, then wait again; otherwise ask_human. If the repo has no checks, run its tests and build yourself and only continue if they pass.
+  6. All checks must pass: \`gh pr checks <n>\`. If one fails because of this PR and the fix is clear, fix, push and wait again; otherwise ask_human. If the repo has no checks at all, run its tests and build yourself and only continue if they pass.
   7. Merge with \`gh pr merge <n> --squash\` (or the method the repo allows). Never use --admin or bypass branch protection; if protection needs a human approval, hand it over with add_human_task(parent_id=${id}, title="Approve and merge PR #<n>: ...").
-  8. complete_task with what the review found, what you fixed, and the merge commit.`;
+  8. complete_task with what was found (by the pipeline or by you), what you fixed, and the merge commit.`;
   }
   const open = `commit to this branch, push it with \`git push -u origin HEAD\`, open a PR against ${repo.base} (\`gh pr create --base ${repo.base}\`), attach the PR with add_links`;
   if (project?.pr_review === "agent") {
-    return `- Code changes: ${open}, then queue its review: add_task(title="Review and merge PR #<n>: <PR title>", kind="agent", ready=true, parent_id=${id}, project="${project.name}", repo="${repo.path}", labels=["pr-review"], source="agent", description="<PR url, what it changes, how you tested it, anything the reviewer should look at>"). A fresh session reviews it with /code-review and merges it once CI is green, so don't merge it yourself. Then finish this task. The runner removes this worktree once the PR is merged.`;
+    return `- Code changes: ${open}, then queue its review: add_task(title="Review and merge PR #<n>: <PR title>", kind="agent", ready=true, parent_id=${id}, project="${project.name}", repo="${repo.path}", labels=["pr-review"], source="agent", description="<PR url, what it changes, how you tested it, anything the reviewer should look at>"). A fresh session takes it from there (the repo's AI review pipeline if it has one, otherwise /code-review) and merges it once CI is green, so don't merge it yourself. Then finish this task. The runner removes this worktree once the PR is merged.`;
   }
   return `- Code changes: ${open}, then hand review to ${OWNER} with add_human_task(parent_id=${id}, title="Review and merge PR #<n>: ..."). Never merge it yourself unless ${OWNER} explicitly asks you to in this task. The runner removes this worktree once the PR is merged.`;
 }

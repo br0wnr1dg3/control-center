@@ -343,7 +343,7 @@ struct ProjectSpecCard: View {
                         Text("A review agent merges when CI is green").tag("agent")
                     }
                     .fixedSize()
-                    .help("With a review agent, a fresh session runs /code-review on each PR, fixes what it finds and merges once CI passes; it asks you only when a finding needs your call.")
+                    .help("With a review agent, a fresh session takes each PR to merged: it waits for the repo's AI review pipeline where there is one (or runs /code-review where there isn't), fixes what's left and merges once CI passes. It asks you only when a finding needs your call.")
                 }
                 .padding(.leading, 22)
             } else if let description = spec.description, !description.isEmpty {
