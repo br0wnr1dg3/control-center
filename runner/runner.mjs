@@ -25,7 +25,7 @@ const CONFIG = {
   pollSeconds: Number(process.env.CC_POLL_SECONDS ?? 20),
   home: process.env.CC_HOME ?? join(homedir(), "Developer", "ControlCenter"),
   cmux: process.env.CC_CMUX ?? "/Applications/cmux.app/Contents/Resources/bin/cmux",
-  // Minutes a finished session's window stays open so you can read the end of it.
+  // Minutes a finished session's window stays open to clean up and so you can read the end of it.
   closeAfterMinutes: Number(process.env.CC_CLOSE_AFTER_MINUTES ?? 5),
   cleanupEveryMinutes: Number(process.env.CC_CLEANUP_MINUTES ?? 10),
   repoSyncMinutes: Number(process.env.CC_REPO_SYNC_MINUTES ?? 10),
@@ -263,7 +263,7 @@ How to work:
 - If you've done your part but the rest of this task is ${OWNER}'s (decisions, posting, steps they have to do), hand it back instead of completing it: update_task(id=${id}, kind="human", status="ready", log="<what you did; what's left for ${OWNER}>"). For a separate human step on a task you are finishing, use add_human_task. Never set status "new".
 - Share outputs as links, not file paths: \`cc-publish <file> --title "<what it is, e.g. Cut v2 · 9:16>"\` uploads it, attaches it to this task and prints a link. Videos get a review page where ${OWNER} and the team comment on exact frames; images, PDFs and HTML pages open inline.
 - When a video or other output needs sign-off (a cut, a design, a page), publish it, say what changed and give the link, then stop and wait. ${OWNER} or the team review it and their decision arrives here as "Review from <name>: Approved ..." or "Changes requested ..." with timecoded notes (and a still of each frame you can open). For changes, make the next version, publish it with the next version number, and wait again. Once approved, finish up.
-- When finished, call complete_task(id=${id}, summary=...) with what you did and where outputs are. The runner closes this window a few minutes later; the session can be resumed from the board if needed.
+- When finished, call complete_task(id=${id}, summary=...) with what you did and where outputs are. The runner then asks you to clean up (stop what you started, remove the worktree if it's safe) and closes this window a few minutes later; the session can be resumed from the board if needed.
 - Only work on this task.`,
   ];
   return lines.filter(Boolean).join("\n");
@@ -354,19 +354,55 @@ exec claude "$(cat ${JSON.stringify(join(dir, "prompt.md"))})" ${claudeArgs}${wo
 
 const minutesSince = (iso) => (Date.now() - new Date(iso).getTime()) / 60000;
 
+const CLEANUP_ASKED = "runner asked the session to clean up";
+
+// Spelled out rather than just "clean up": the repo is public and runner machines don't share a
+// global CLAUDE.md. git -C because removing the worktree deletes the session's working directory.
+export function cleanupPrompt(task) {
+  const repo = task.worktree?.split("/.claude/worktrees/")[0];
+  const target = task.worktree
+    ? `the worktree ${task.worktree}`
+    : "any git worktree you made for this task (if you made none, skip the git steps)";
+  const main = repo ?? "<main checkout, the first entry of git worktree list>";
+  return `Clean up: CC-${task.id} is done and the runner closes this window in a few minutes. Don't start new work or change the task. Stop any dev servers and background processes you started. Then tidy ${target}, one command at a time, never chained. First check it has no uncommitted changes, no unpushed commits, and that its PR is merged or its branch adds nothing. If any of those fail, leave it alone and say why in one line, without asking a question: the runner removes it later, once it's safe. Otherwise run git -C ${main} worktree remove <path>, then git -C ${main} branch -d <branch> (never -D or --force; if git refuses, keep the branch and say so), then git -C ${main} worktree prune. End with one line saying what you cleaned up.`;
+}
+
+// When this round of done was handed to the session for cleanup. An ask from before the task was
+// reopened doesn't count.
+async function cleanupAskedAt(task) {
+  const since = encodeURIComponent(task.completed_at ?? task.updated_at);
+  const [event] = await db(
+    `task_events?task_id=eq.${task.id}&kind=eq.status&body=eq.${encodeURIComponent(CLEANUP_ASKED)}&created_at=gte.${since}&select=created_at&order=created_at.desc&limit=1`,
+  );
+  return event?.created_at ?? null;
+}
+
 // Close the windows of sessions whose task is finished or no longer the agent's: cancelled at once,
-// the rest after a short grace period.
-async function closeFinished(workspaces, activeIds) {
+// done once the session has been asked to clean up and had the grace period to do it, the rest
+// after the grace period alone.
+export async function closeFinished(workspaces, activeIds) {
   const ids = [...workspaces.keys()].filter((id) => !activeIds.has(id));
   if (!ids.length) return;
   // Finished, or no longer the agent's (handed back to the owner, or moved back to new).
   const tasks = await db(
-    `tasks?id=in.(${ids.join(",")})&or=(status.in.(done,cancelled,new),kind.neq.agent)&select=id,status,completed_at,updated_at`,
+    `tasks?id=in.(${ids.join(",")})&or=(status.in.(done,cancelled,new),kind.neq.agent)&select=id,status,completed_at,updated_at,worktree`,
   );
   for (const task of tasks) {
-    const since = task.completed_at ?? task.updated_at;
+    const workspace = workspaces.get(task.id);
+    let since = task.completed_at ?? task.updated_at;
+    if (task.status === "done") {
+      const asked = await cleanupAskedAt(task);
+      if (!asked) {
+        // Recorded even if typing fails, so a dead window still closes; cleanupWorktrees is the backstop.
+        await typeInto(workspace, cleanupPrompt(task)).catch((err) => log(`CC-${task.id}: couldn't ask for cleanup:`, err.message));
+        await addEvent(task.id, "status", CLEANUP_ASKED);
+        log(`asked CC-${task.id} to clean up`);
+        continue;
+      }
+      since = asked;
+    }
     if (task.status !== "cancelled" && minutesSince(since) < CONFIG.closeAfterMinutes) continue;
-    await cmux("close-workspace", "--workspace", workspaces.get(task.id));
+    await cmux("close-workspace", "--workspace", workspace);
     await addEvent(task.id, "status", "runner closed the session window");
     log(`closed CC-${task.id} (${task.status})`);
   }
