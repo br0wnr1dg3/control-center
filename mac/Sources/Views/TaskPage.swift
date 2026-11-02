@@ -436,7 +436,17 @@ struct CommentBubble: View {
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                         .onTapGesture { NSWorkspace.shared.open(still) }
                     }
-                    if !comment.body.isEmpty { MarkdownView(text: comment.body, size: 13, selectable: true) }
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let quote = comment.quote {
+                            Text("“\(quote)”")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                                .padding(.leading, 8)
+                                .overlay(alignment: .leading) { Rectangle().fill(Color.yellow.opacity(0.7)).frame(width: 3) }
+                        }
+                        if !comment.body.isEmpty { MarkdownView(text: comment.body, size: 13, selectable: true) }
+                    }
                 }
                 if let attachments = comment.attachments, !attachments.isEmpty {
                     CommentImages(attachments: attachments)

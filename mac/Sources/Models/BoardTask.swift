@@ -207,10 +207,11 @@ struct TaskComment: Codable, Identifiable, Equatable {
     var reviewer: String?   // name on review-page notes and decisions
     var timecode: Double?   // seconds into the video a review note is about
     var stillUrl: String?   // the commented frame
+    var quote: String?      // the passage a review note on a text output is about
     var attachments: [CommentAttachment]?   // pasted images, in the comment-attachments bucket
 
     enum CodingKeys: String, CodingKey {
-        case id, author, body, timecode, attachments
+        case id, author, body, timecode, attachments, quote
         case createdAt = "created_at"
         case reviewer = "author_name"
         case stillUrl = "still_url"
