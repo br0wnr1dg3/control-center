@@ -3,12 +3,16 @@ import SwiftUI
 /// One inbox row: everything new on a task, newest first.
 struct InboxThread: Identifiable, Equatable {
     let items: [InboxItem]
+    /// The task is in Needs you: it stays in the inbox, read or not, until it's answered or dismissed.
+    var waiting = false
 
     var id: Int { task.id }
     var task: InboxItem.TaskRef { latest.task }
     var latest: InboxItem { items[0] }
     var isUnread: Bool { items.contains(where: \.isUnread) }
     var unreadCount: Int { items.filter(\.isUnread).count }
+    /// Shown in the Unread view and counted in the badges.
+    var needsAttention: Bool { isUnread || waiting }
 }
 
 /// Things to react to, Linear-style: a list of tasks with something new on the left, the selected
@@ -21,7 +25,7 @@ struct InboxView: View {
     private var threads: [InboxThread] {
         let all = store.inboxThreads
         // Keep the open row visible after it's read, so it doesn't jump out from under you.
-        return showAll ? all : all.filter { $0.isUnread || $0.id == store.selectedTaskId }
+        return showAll ? all : all.filter { $0.needsAttention || $0.id == store.selectedTaskId }
     }
 
     var body: some View {

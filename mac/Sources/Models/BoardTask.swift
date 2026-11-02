@@ -108,6 +108,7 @@ struct BoardTask: Codable, Identifiable, Equatable {
     var worktree: String?  // agent's git worktree, until the runner removes it
     var repo: String?      // repo the agent session starts in; empty = runner decides
     var completedAt: String?
+    var updatedAt: String?
 
     enum CodingKeys: String, CodingKey {
         case id, title, description, kind, status, priority, project, labels, links, due, today, source, question, worktree, repo
@@ -118,6 +119,7 @@ struct BoardTask: Codable, Identifiable, Equatable {
         case sessionId = "session_id"
         case questionOptions = "question_options"
         case completedAt = "completed_at"
+        case updatedAt = "updated_at"
     }
 
     var key: String { "CC-\(id)" }
