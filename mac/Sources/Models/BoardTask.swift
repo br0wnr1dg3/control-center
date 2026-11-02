@@ -205,9 +205,10 @@ struct TaskComment: Codable, Identifiable, Equatable {
     var reviewer: String?   // name on review-page notes and decisions
     var timecode: Double?   // seconds into the video a review note is about
     var stillUrl: String?   // the commented frame
+    var attachments: [CommentAttachment]?   // pasted images, in the comment-attachments bucket
 
     enum CodingKeys: String, CodingKey {
-        case id, author, body, timecode
+        case id, author, body, timecode, attachments
         case createdAt = "created_at"
         case reviewer = "author_name"
         case stillUrl = "still_url"
@@ -225,6 +226,25 @@ struct TaskComment: Codable, Identifiable, Equatable {
     var timecodeLabel: String? {
         timecode.map { String(format: "%d:%04.1f", Int($0) / 60, $0.truncatingRemainder(dividingBy: 60)) }
     }
+}
+
+/// A stored image on a comment: `path` is its key in the comment-attachments bucket.
+struct CommentAttachment: Codable, Hashable {
+    let path: String
+    let name: String
+    let type: String
+
+    var json: [String: String] { ["path": path, "name": name, "type": type] }
+}
+
+/// An image picked for a comment that hasn't been sent yet.
+struct PendingImage: Identifiable {
+    let id = UUID()
+    let data: Data
+    let type: String        // MIME type
+    let ext: String
+    let name: String
+    let preview: NSImage
 }
 
 struct ActivityEvent: Codable, Identifiable, Equatable {

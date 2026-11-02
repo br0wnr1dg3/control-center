@@ -237,14 +237,23 @@ export function buildServer(env: Env) {
       const [task, children, comments, events] = await Promise.all([
         db.from("tasks").select("*,team:teams(key,name)").eq("id", id).single(),
         db.from("tasks").select("id,title,kind,status").eq("parent_id", id).order("id"),
-        db.from("task_comments").select("author,body,created_at").eq("task_id", id).order("created_at"),
+        db.from("task_comments").select("author,body,attachments,created_at").eq("task_id", id).order("created_at"),
         db.from("task_events").select("kind,body,actor,created_at").eq("task_id", id).order("created_at"),
       ]);
       if (task.error) return fail(task.error.message);
+      // Pasted screenshots live in a private bucket: hand out short-lived links to them.
+      const withImages = await Promise.all(
+        (comments.data ?? []).map(async ({ attachments, ...c }) => {
+          const files = (attachments ?? []) as { path: string; name: string }[];
+          if (!files.length) return c;
+          const { data } = await db.storage.from("comment-attachments").createSignedUrls(files.map((f) => f.path), 3600);
+          return { ...c, images: (data ?? []).map((d) => d.signedUrl).filter(Boolean) };
+        }),
+      );
       return ok({
         ...withKey(task.data),
         subtasks: (children.data ?? []).map(withKey),
-        comments: comments.data ?? [],
+        comments: withImages,
         activity: events.data ?? [],
       });
     },

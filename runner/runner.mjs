@@ -104,12 +104,45 @@ async function typeInto(workspace, text) {
 
 const localDay = () => new Date().toLocaleDateString("en-CA");
 
-// the owner's comments the live session hasn't seen yet (answers are comments too).
 // the owner's comments and review decisions (from them or the team) the live session hasn't seen yet.
-const undeliveredComments = (taskId) =>
-  db(
-    `task_comments?task_id=eq.${taskId}&author=in.(me,reviewer)&delivered_at=is.null&order=created_at&select=id,author,author_name,body`,
+const undeliveredComments = async (taskId) =>
+  withAttachments(
+    taskId,
+    await db(
+      `task_comments?task_id=eq.${taskId}&author=in.(me,reviewer)&delivered_at=is.null&order=created_at&select=id,author,author_name,body,attachments`,
+    ),
   );
+
+// Images on a comment are in Storage, which the session can't reach: save them in the task folder and
+// put their paths in the comment so the agent can open them with Read.
+export async function withAttachments(taskId, comments) {
+  const dir = join(TASKS_DIR, String(taskId), "attachments");
+  return Promise.all(
+    comments.map(async (c) => {
+      if (!c.attachments?.length) return c;
+      await mkdir(dir, { recursive: true });
+      const paths = [];
+      for (const a of c.attachments) {
+        const file = join(dir, `${c.id}-${basename(a.path)}`);
+        try {
+          if (!existsSync(file)) {
+            const res = await fetch(`${CONFIG.supabaseUrl}/storage/v1/object/authenticated/comment-attachments/${a.path}`, {
+              headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+            });
+            if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+            await writeFile(file, Buffer.from(await res.arrayBuffer()));
+          }
+          paths.push(file);
+        } catch (err) {
+          log(`CC-${taskId}: couldn't download attachment ${a.path}: ${err.message}`);
+        }
+      }
+      if (!paths.length) return c;
+      const note = `(attached ${paths.length === 1 ? "image" : `${paths.length} images`}, open with Read: ${paths.join(", ")})`;
+      return { ...c, body: [c.body, note].filter(Boolean).join(" ") };
+    }),
+  );
+}
 
 async function markDelivered(comments) {
   if (!comments.length) return;
@@ -315,7 +348,7 @@ async function launch(task, { resume = false } = {}) {
   } else {
     sessionId = randomUUID();
     const [comments, activity] = await Promise.all([
-      db(`task_comments?task_id=eq.${task.id}&order=created_at&select=id,author,body`),
+      db(`task_comments?task_id=eq.${task.id}&order=created_at&select=id,author,body,attachments`).then((c) => withAttachments(task.id, c)),
       db(`task_events?task_id=eq.${task.id}&order=created_at&select=kind,body`),
     ]);
     await writeFile(join(dir, "prompt.md"), taskPrompt(task, sessionId, dir, comments, activity, team, project, worktree && repo, folder));
