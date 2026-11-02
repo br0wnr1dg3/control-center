@@ -4,7 +4,8 @@
 //   cc-publish <file> [--title "Cut v2 · 9:16"] [--task 52]
 //
 // Prints the review link. The task defaults to $CC_TASK_ID (set for runner sessions). Videos get a
-// frame-accurate review page; images, PDFs and HTML pages are shown inline; anything else downloads.
+// frame-accurate review page; HTML pages and PDFs fill the window; Markdown and text read as a document
+// reviewers can comment on passage by passage; images are shown inline; anything else downloads.
 
 import { execFileSync } from "node:child_process";
 import { createReadStream, statSync } from "node:fs";
@@ -15,7 +16,7 @@ const TYPES = {
   ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".m4v": "video/mp4",
   ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
   ".pdf": "application/pdf", ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
-  ".txt": "text/plain; charset=utf-8", ".md": "text/plain; charset=utf-8", ".json": "application/json",
+  ".txt": "text/plain; charset=utf-8", ".md": "text/markdown; charset=utf-8", ".json": "application/json",
   ".mp3": "audio/mpeg", ".wav": "audio/wav", ".csv": "text/csv; charset=utf-8",
 };
 

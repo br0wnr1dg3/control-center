@@ -104,7 +104,7 @@ struct BoardAPI {
     }
 
     func fetchComments(_ taskId: Int) async throws -> [TaskComment] {
-        try await get("task_comments?task_id=eq.\(taskId)&select=id,author,author_name,body,timecode,still_url,attachments,created_at&order=created_at")
+        try await get("task_comments?task_id=eq.\(taskId)&select=id,author,author_name,body,timecode,still_url,quote,attachments,created_at&order=created_at")
     }
 
     func fetchActivity(_ taskId: Int) async throws -> [ActivityEvent] {
