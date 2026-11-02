@@ -78,7 +78,7 @@ struct BoardAPI {
     }
 
     func fetchProjects() async throws -> [ProjectSpec] {
-        try await get("projects?select=id,name,team_id,description,repos&order=name")
+        try await get("projects?select=id,name,team_id,description,repos,pr_review&order=name")
     }
 
     @discardableResult

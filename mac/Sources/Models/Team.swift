@@ -43,10 +43,12 @@ struct ProjectSpec: Codable, Identifiable, Equatable {
     var teamId: Int?
     var description: String?
     var repos: [Repo]
+    var prReview: String?   // owner | agent: who takes agents' PRs to merged
 
     enum CodingKeys: String, CodingKey {
         case id, name, description, repos
         case teamId = "team_id"
+        case prReview = "pr_review"
     }
 }
 
