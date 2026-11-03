@@ -107,6 +107,8 @@ struct BoardTask: Codable, Identifiable, Equatable {
     var sessionId: String?
     var worktree: String?  // agent's git worktree, until the runner removes it
     var repo: String?      // repo the agent session starts in; empty = runner decides
+    var externalRef: ExternalRef?  // where it lives in the app that sent it (inbound events)
+    var requestedBy: Requester?    // who asked for it in that app
     // Only fetchTasks embeds these. Each carries its own details: finished tasks may not be loaded.
     var blockers: [Dependency]?
     var blocks: [Dependency]?
@@ -118,6 +120,8 @@ struct BoardTask: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, title, description, kind, status, priority, project, labels, links, due, today, source, question, worktree, repo, attachments, blockers, blocks
         case waitingOn = "waiting_on"
+        case externalRef = "external_ref"
+        case requestedBy = "requested_by"
         case teamId = "team_id"
         case scheduledOn = "scheduled_on"
         case sortOrder = "sort_order"
@@ -126,6 +130,26 @@ struct BoardTask: Codable, Identifiable, Equatable {
         case questionOptions = "question_options"
         case completedAt = "completed_at"
         case updatedAt = "updated_at"
+    }
+
+    struct ExternalRef: Codable, Equatable {
+        let source: String
+        let id: String
+        var url: String?
+    }
+
+    struct Requester: Codable, Equatable {
+        var name: String?
+        var email: String?
+
+        var label: String? {
+            switch (name, email) {
+            case let (name?, email?): "\(name) <\(email)>"
+            case let (name?, nil): name
+            case let (nil, email?): email
+            case (nil, nil): nil
+            }
+        }
     }
 
     struct Dependency: Codable, Equatable {
@@ -248,6 +272,7 @@ struct TaskComment: Codable, Identifiable, Equatable {
         case "me": "You"
         case "agent": "Agent"
         case "reviewer": reviewer ?? "Reviewer"
+        case "external": reviewer ?? "External"
         default: "Claude"
         }
     }

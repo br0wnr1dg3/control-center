@@ -17,6 +17,7 @@
     // Email capture (src/email.ts) is configured with secrets: AGENTMAIL_INBOX, ALLOWED_SENDERS
     // (comma-separated), AGENTMAIL_API_KEY, AGENTMAIL_WEBHOOK_SECRET, ANTHROPIC_API_KEY (optional).
   },
-  // Secrets (npx wrangler secret put <NAME>): SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OWNER_PASSPHRASE
+  // Secrets (npx wrangler secret put <NAME>): SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OWNER_PASSPHRASE.
+  // Inbound events (src/inbound.ts): INBOUND_SECRET_<TEAM KEY> for each team that accepts them.
   "observability": { "enabled": true }
 }

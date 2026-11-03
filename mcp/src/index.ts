@@ -2,6 +2,7 @@ import OAuthProvider, { type ConsentDescription, type OAuthHelpers } from "@clou
 import { createMcpHandler } from "agents/mcp/server";
 import { env } from "cloudflare:workers";
 import { handleAgentMail, type EmailEnv } from "./email";
+import { handleInbound } from "./inbound";
 import { handleReview, type ReviewEnv } from "./review";
 import { buildServer } from "./tools";
 
@@ -57,6 +58,7 @@ const authHandler = {
   async fetch(request: Request, env: AuthEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/hooks/agentmail") return handleAgentMail(request, env as unknown as EmailEnv, ctx);
+    if (url.pathname === "/hooks/inbound") return handleInbound(request, env);
     const review = await handleReview(request, env as unknown as ReviewEnv);
     if (review) return review;
     if (url.pathname !== "/authorize") return new Response("Not found", { status: 404 });

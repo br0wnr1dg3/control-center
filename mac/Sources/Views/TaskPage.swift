@@ -443,6 +443,7 @@ struct CommentBubble: View {
         switch comment.author {
         case "me": "person.crop.circle.fill"
         case "reviewer": "play.rectangle.fill"
+        case "external": "arrow.down.left.circle.fill"
         default: "sparkles"
         }
     }
@@ -620,6 +621,29 @@ struct TaskProperties: View {
                     .buttonStyle(.borderless)
                     .font(.caption)
                     .help(worktree)
+                }
+            }
+            if let ref = task.externalRef {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("From \(ref.source)").font(.caption).foregroundStyle(.secondary)
+                    if let link = ref.url, let url = URL(string: link) {
+                        Button {
+                            NSWorkspace.shared.open(url)
+                        } label: {
+                            Label(ref.id, systemImage: "arrow.up.right.square")
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .help(link)
+                    } else {
+                        Text(ref.id).font(.caption).textSelection(.enabled)
+                    }
+                }
+            }
+            if let requester = task.requestedBy?.label {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Requested by").font(.caption).foregroundStyle(.secondary)
+                    Text(requester).font(.caption).textSelection(.enabled)
                 }
             }
             if let source = task.source {
