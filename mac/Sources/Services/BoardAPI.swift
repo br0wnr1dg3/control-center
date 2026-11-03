@@ -123,13 +123,13 @@ struct BoardAPI {
         _ = try await request(path, method: "PATCH", body: fields)
     }
 
-    func addComment(_ taskId: Int, body: String, author: String = "me", attachments: [CommentAttachment] = []) async throws {
+    func addComment(_ taskId: Int, body: String, author: String = "me", attachments: [FileAttachment] = []) async throws {
         var fields: [String: Any] = ["task_id": taskId, "author": author, "body": body]
         if !attachments.isEmpty { fields["attachments"] = attachments.map(\.json) }
         _ = try await request("task_comments", method: "POST", body: fields)
     }
 
-    // ---------- Comment images (private Storage bucket) ----------
+    // ---------- Task and comment files (private Storage bucket) ----------
 
     private static let storageURL = URL(string: "../../storage/v1/object/comment-attachments/", relativeTo: baseURL)!.absoluteURL
 
@@ -146,13 +146,14 @@ struct BoardAPI {
         return data
     }
 
-    func uploadImage(_ image: PendingImage, taskId: Int) async throws -> CommentAttachment {
-        let path = "\(taskId)/\(UUID().uuidString.lowercased()).\(image.ext)"
-        _ = try await storage(path, method: "POST", body: image.data, type: image.type)
-        return CommentAttachment(path: path, name: image.name, type: image.type)
+    /// `folder` is the task id, or "new" for files on a task that doesn't exist yet.
+    func uploadFile(_ file: PendingFile, folder: String) async throws -> FileAttachment {
+        let path = "\(folder)/\(UUID().uuidString.lowercased())\(file.ext.isEmpty ? "" : ".\(file.ext)")"
+        _ = try await storage(path, method: "POST", body: file.data, type: file.type)
+        return FileAttachment(path: path, name: file.name, type: file.type)
     }
 
-    func downloadImage(_ path: String) async throws -> Data {
+    func downloadFile(_ path: String) async throws -> Data {
         try await storage(path)
     }
 

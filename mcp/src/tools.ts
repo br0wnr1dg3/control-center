@@ -283,17 +283,23 @@ export function buildServer(env: Env) {
         db.from("task_events").select("kind,body,actor,created_at").eq("task_id", id).order("created_at"),
       ]);
       if (task.error) return fail(task.error.message);
-      // Pasted screenshots live in a private bucket: hand out short-lived links to them.
+      // Pasted screenshots and attached files live in a private bucket: hand out short-lived links to them.
+      const signed = async (attachments: unknown) => {
+        const files = (attachments ?? []) as { path: string; name: string; type: string }[];
+        if (!files.length) return [];
+        const { data } = await db.storage.from("comment-attachments").createSignedUrls(files.map((f) => f.path), 3600);
+        return files.flatMap((f, i) => (data?.[i]?.signedUrl ? [{ name: f.name, type: f.type, url: data[i].signedUrl }] : []));
+      };
       const withImages = await Promise.all(
         (comments.data ?? []).map(async ({ attachments, ...c }) => {
-          const files = (attachments ?? []) as { path: string; name: string }[];
-          if (!files.length) return c;
-          const { data } = await db.storage.from("comment-attachments").createSignedUrls(files.map((f) => f.path), 3600);
-          return { ...c, images: (data ?? []).map((d) => d.signedUrl).filter(Boolean) };
+          const files = await signed(attachments);
+          return files.length ? { ...c, images: files.map((f) => f.url), files } : c;
         }),
       );
+      const { attachments, ...rest } = task.data;
       return ok({
-        ...withKey(task.data),
+        ...withKey(rest),
+        attachments: await signed(attachments),
         subtasks: (children.data ?? []).map(withKey),
         blocked_by: linkedTasks(blockers.data),
         blocks: linkedTasks(blocking.data),
