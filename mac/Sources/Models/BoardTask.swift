@@ -107,11 +107,12 @@ struct BoardTask: Codable, Identifiable, Equatable {
     var sessionId: String?
     var worktree: String?  // agent's git worktree, until the runner removes it
     var repo: String?      // repo the agent session starts in; empty = runner decides
+    var attachments: [FileAttachment]?  // screenshots and files added when the task was written
     var completedAt: String?
     var updatedAt: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, description, kind, status, priority, project, labels, links, due, today, source, question, worktree, repo
+        case id, title, description, kind, status, priority, project, labels, links, due, today, source, question, worktree, repo, attachments
         case teamId = "team_id"
         case scheduledOn = "scheduled_on"
         case sortOrder = "sort_order"
@@ -208,7 +209,7 @@ struct TaskComment: Codable, Identifiable, Equatable {
     var timecode: Double?   // seconds into the video a review note is about
     var stillUrl: String?   // the commented frame
     var quote: String?      // the passage a review note on a text output is about
-    var attachments: [CommentAttachment]?   // pasted images, in the comment-attachments bucket
+    var attachments: [FileAttachment]?   // pasted screenshots and files, in the comment-attachments bucket
 
     enum CodingKeys: String, CodingKey {
         case id, author, body, timecode, attachments, quote
@@ -231,23 +232,25 @@ struct TaskComment: Codable, Identifiable, Equatable {
     }
 }
 
-/// A stored image on a comment: `path` is its key in the comment-attachments bucket.
-struct CommentAttachment: Codable, Hashable {
+/// A stored file on a task or comment: `path` is its key in the comment-attachments bucket.
+struct FileAttachment: Codable, Hashable {
     let path: String
     let name: String
     let type: String
 
     var json: [String: String] { ["path": path, "name": name, "type": type] }
+    var isImage: Bool { type.hasPrefix("image/") }
 }
 
-/// An image picked for a comment that hasn't been sent yet.
-struct PendingImage: Identifiable {
+/// A screenshot or file picked for a task or comment that hasn't been uploaded yet.
+struct PendingFile: Identifiable {
     let id = UUID()
     let data: Data
     let type: String        // MIME type
     let ext: String
     let name: String
-    let preview: NSImage
+    let preview: NSImage    // the image itself, or the file's Finder icon
+    var isImage: Bool { type.hasPrefix("image/") }
 }
 
 struct ActivityEvent: Codable, Identifiable, Equatable {

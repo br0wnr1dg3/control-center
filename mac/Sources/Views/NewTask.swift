@@ -39,7 +39,15 @@ struct NewTaskComposer: View {
     @State private var createMore = false
     @State private var editingProject = false
     @State private var editingLabels = false
+    @State private var files: [PendingFile] = []
     @FocusState private var titleFocused: Bool
+
+    /// Grows with the text like a TextEditor would (the paste-aware view scrolls instead of sizing itself).
+    private var descriptionHeight: CGFloat {
+        let lines = draft.description.split(separator: "\n", omittingEmptySubsequences: false)
+            .reduce(0) { $0 + max(1, Int(ceil(Double($1.count) / 90))) }
+        return min(260, max(70, CGFloat(lines) * 18 + 4))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -53,17 +61,16 @@ struct NewTaskComposer: View {
                     .onSubmit(create)
                 ZStack(alignment: .topLeading) {
                     if draft.description.isEmpty {
-                        Text("Add description… (Markdown)")
+                        Text("Add description… (Markdown; paste screenshots or drop files)")
+                            .font(.system(size: 14))
                             .foregroundStyle(.tertiary)
                             .padding(.leading, 5)
                             .allowsHitTesting(false)
                     }
-                    TextEditor(text: $draft.description)
-                        .font(.system(size: 14))
-                        .scrollContentBackground(.hidden)
-                        .frame(minHeight: 70, maxHeight: 260)
-                        .fixedSize(horizontal: false, vertical: true)
+                    ComposerTextView(text: $draft.description, fontSize: 14) { files.append(contentsOf: $0) }
+                        .frame(height: descriptionHeight)
                 }
+                PendingFilesStrip(images: $files)
             }
             .padding(.horizontal, 18)
             .padding(.top, 6)
@@ -185,6 +192,7 @@ struct NewTaskComposer: View {
 
     private var footer: some View {
         HStack(spacing: 12) {
+            AttachFilesButton { files.append(contentsOf: $0) }
             if draft.kind == .agent {
                 Text(draft.status == .ready
                      ? "The agent starts \(draft.scheduledOn.map { "on \(Day.title($0))" } ?? "right away")."
@@ -216,7 +224,8 @@ struct NewTaskComposer: View {
 
     private func create() {
         guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        store.create(draft.fields, open: !createMore && draft.parentId == nil)
+        store.create(draft.fields, files: files, open: !createMore && draft.parentId == nil)
+        files = []
         if createMore {
             draft.title = ""
             draft.description = ""

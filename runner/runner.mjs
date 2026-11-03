@@ -113,36 +113,48 @@ const undeliveredComments = async (taskId) =>
     ),
   );
 
-// Images on a comment are in Storage, which the session can't reach: save them in the task folder and
-// put their paths in the comment so the agent can open them with Read.
-export async function withAttachments(taskId, comments) {
+// Attached files are in Storage, which the session can't reach: save them in the task folder so the
+// agent can open them with Read. Returns the local paths that downloaded.
+async function download(taskId, attachments, fileName) {
   const dir = join(TASKS_DIR, String(taskId), "attachments");
+  await mkdir(dir, { recursive: true });
+  const paths = [];
+  for (const [i, a] of attachments.entries()) {
+    const file = join(dir, fileName(a, i));
+    try {
+      if (!existsSync(file)) {
+        const res = await fetch(`${CONFIG.supabaseUrl}/storage/v1/object/authenticated/comment-attachments/${a.path}`, {
+          headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+        });
+        if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+        await writeFile(file, Buffer.from(await res.arrayBuffer()));
+      }
+      paths.push(file);
+    } catch (err) {
+      log(`CC-${taskId}: couldn't download attachment ${a.path}: ${err.message}`);
+    }
+  }
+  return paths;
+}
+
+const filesNote = (paths) => `(attached ${paths.length === 1 ? "file" : `${paths.length} files`}, open with Read: ${paths.join(", ")})`;
+
+// A comment's files, with their paths added to its body.
+export async function withAttachments(taskId, comments) {
   return Promise.all(
     comments.map(async (c) => {
       if (!c.attachments?.length) return c;
-      await mkdir(dir, { recursive: true });
-      const paths = [];
-      for (const a of c.attachments) {
-        const file = join(dir, `${c.id}-${basename(a.path)}`);
-        try {
-          if (!existsSync(file)) {
-            const res = await fetch(`${CONFIG.supabaseUrl}/storage/v1/object/authenticated/comment-attachments/${a.path}`, {
-              headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
-            });
-            if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-            await writeFile(file, Buffer.from(await res.arrayBuffer()));
-          }
-          paths.push(file);
-        } catch (err) {
-          log(`CC-${taskId}: couldn't download attachment ${a.path}: ${err.message}`);
-        }
-      }
-      if (!paths.length) return c;
-      const note = `(attached ${paths.length === 1 ? "image" : `${paths.length} images`}, open with Read: ${paths.join(", ")})`;
-      return { ...c, body: [c.body, note].filter(Boolean).join(" ") };
+      const paths = await download(taskId, c.attachments, (a) => `${c.id}-${basename(a.path)}`);
+      return paths.length ? { ...c, body: [c.body, filesNote(paths)].filter(Boolean).join(" ") } : c;
     }),
   );
 }
+
+// The files added when the task was written, under their own names (numbered, since two can share one).
+export const taskAttachments = (task) =>
+  task.attachments?.length
+    ? download(task.id, task.attachments, (a, i) => `task-${i + 1}-${basename(a.name || a.path).replace(/[^\w.\- ]/g, "_")}`)
+    : Promise.resolve([]);
 
 async function markDelivered(comments) {
   if (!comments.length) return;
@@ -279,7 +291,7 @@ export function codeChanges(task, repo, project) {
   return `- Code changes: ${open}, then hand review to ${OWNER} with add_human_task(parent_id=${id}, title="Review and merge PR #<n>: ..."). Never merge it yourself unless ${OWNER} explicitly asks you to in this task. The runner removes this worktree once the PR is merged.`;
 }
 
-function taskPrompt(task, sessionId, dir, comments, activity, team, project, repo, folder) {
+function taskPrompt(task, sessionId, dir, comments, activity, team, project, repo, folder, files = []) {
   const id = task.id;
   const repos = [...(project?.repos ?? []), ...(team?.repos ?? [])];
   const meta = [
@@ -299,6 +311,7 @@ function taskPrompt(task, sessionId, dir, comments, activity, team, project, rep
     team?.workdir && `\n${team.name}'s working folder: ${team.workdir} (one folder per repo)`,
     team?.github && `${team.name}'s GitHub: ${team.github}`,
     task.description && `\nTask description:\n${task.description}`,
+    files.length && `\nAttached to the task (screenshots and files from ${OWNER}; open each with Read before starting):\n${files.map((f) => `- ${f}`).join("\n")}`,
     task.links?.length && `\nLinks:\n${task.links.map((l) => `- ${l.title}: ${l.url}`).join("\n")}`,
     comments.length && `\nComments:\n${comments.map((c) => `- ${c.author}: ${c.body}`).join("\n")}`,
     activity.length && `\nActivity:\n${activity.map((e) => `- [${e.kind}] ${e.body}`).join("\n")}`,
@@ -372,11 +385,15 @@ async function launch(task, { resume = false } = {}) {
     cwd = existing ?? teamDir ?? dir;
   } else {
     sessionId = randomUUID();
-    const [comments, activity] = await Promise.all([
+    const [comments, activity, files] = await Promise.all([
       db(`task_comments?task_id=eq.${task.id}&order=created_at&select=id,author,body,attachments`).then((c) => withAttachments(task.id, c)),
       db(`task_events?task_id=eq.${task.id}&order=created_at&select=kind,body`),
+      taskAttachments(task),
     ]);
-    await writeFile(join(dir, "prompt.md"), taskPrompt(task, sessionId, dir, comments, activity, team, project, worktree && repo, folder));
+    await writeFile(
+      join(dir, "prompt.md"),
+      taskPrompt(task, sessionId, dir, comments, activity, team, project, worktree && repo, folder, files),
+    );
     await markDelivered(comments.filter((c) => c.author === "me" || c.author === "reviewer"));
     claudeArgs = `--session-id ${sessionId}`;
   }
