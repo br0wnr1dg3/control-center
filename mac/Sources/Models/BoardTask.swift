@@ -107,12 +107,17 @@ struct BoardTask: Codable, Identifiable, Equatable {
     var sessionId: String?
     var worktree: String?  // agent's git worktree, until the runner removes it
     var repo: String?      // repo the agent session starts in; empty = runner decides
+    // Only fetchTasks embeds these. Each carries its own details: finished tasks may not be loaded.
+    var blockers: [Dependency]?
+    var blocks: [Dependency]?
+    var waitingOn: [Int]?  // blockers still open, as the runner sees them (waiting_on in SQL)
     var attachments: [FileAttachment]?  // screenshots and files added when the task was written
     var completedAt: String?
     var updatedAt: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, description, kind, status, priority, project, labels, links, due, today, source, question, worktree, repo, attachments
+        case id, title, description, kind, status, priority, project, labels, links, due, today, source, question, worktree, repo, attachments, blockers, blocks
+        case waitingOn = "waiting_on"
         case teamId = "team_id"
         case scheduledOn = "scheduled_on"
         case sortOrder = "sort_order"
@@ -122,6 +127,24 @@ struct BoardTask: Codable, Identifiable, Equatable {
         case completedAt = "completed_at"
         case updatedAt = "updated_at"
     }
+
+    struct Dependency: Codable, Equatable {
+        let task: LinkedTask
+    }
+
+    /// What a dependency needs to show, whichever side of it this task is on.
+    struct LinkedTask: Codable, Equatable, Identifiable {
+        let id: Int
+        let title: String
+        let status: TaskStatus
+        let kind: TaskKind
+
+        var key: String { "CC-\(id)" }
+    }
+
+    /// Approved or untriaged, but its blockers aren't finished yet. Once started, a blocker no longer holds it.
+    var isWaiting: Bool { (status == .ready || status == .new) && !(waitingOn ?? []).isEmpty }
+    var waitingLabel: String { "Waiting on " + (waitingOn ?? []).map { "CC-\($0)" }.joined(separator: ", ") }
 
     var key: String { "CC-\(id)" }
     var priorityLevel: Priority { Priority(rawValue: priority) ?? .none }
@@ -134,6 +157,8 @@ struct BoardTask: Codable, Identifiable, Equatable {
         guard status.isOpen else { return false }
         let today = Day.today
         if day == today {
+            // Approved work for the owner that can't be done yet isn't for today; the inbox says when it can.
+            if status == .ready && kind != .agent && isWaiting { return false }
             if self.today { return true }
             if let s = scheduledOn, s <= today { return true }
             if let d = due, d <= today { return true }

@@ -30,6 +30,21 @@ and a working folder; **projects** belong to one team and have their own spec an
 text and inherit the project's team (trigger `sync_task_project`); moving a project moves its tasks. The runner
 puts the team briefing, project spec and repo paths at the top of every agent prompt.
 
+### Stages
+
+`task_dependencies` makes one task wait on others (`blocked_by` on `add_task` / `update_task`; `get_task` shows `blocked_by` and `blocks`). Self-references and cycles are rejected. Blockers delay a task, they don't approve it: `ready` still means the owner said go, and no trigger ever moves a task to `ready`.
+
+`waiting_on(task)` is the one definition of waiting: the blockers still open, neither `done` nor `cancelled`. It's a SQL function PostgREST exposes as a computed column (`select=*,waiting_on`, `waiting_on=eq.{}`).
+
+- **While waiting**: the runner doesn't start a `ready` agent task, and it's left out of the `agent_ready` view. A `ready` task for the owner stays off Today, with a "Waiting on CC-x" badge.
+- **Last open blocker finishes**: a `ready` agent task starts as usual, once `scheduled_on` arrives. A `ready` task for the owner lands in the inbox. A `new` task stays `new`, since it still needs approving.
+- **A blocker is cancelled**: a `new` or `ready` task moves to `needs_you` with a note. Answering makes it `ready`, and it still waits for any other open blockers. It's never cancelled silently.
+- **A blocker is removed or deleted while open**: the task stops waiting, and that's logged on it.
+
+Other statuses are left alone: a started task keeps going even if a blocker is added. A live session keeps receiving comments and answers while waiting. Reopening a blocker makes `ready` tasks wait again.
+
+So to chain stages that run themselves, approve them all up front: `add_task(ready=true, blocked_by=[...])`.
+
 ## MCP tools
 
 | Tool | Purpose |
@@ -84,6 +99,8 @@ Forward an email to **brownridge@agentmail.to** and it becomes task(s). AgentMai
 ## Reviews (`mcp/src/review.ts`, `runner/bin/cc-publish`)
 
 Agents share outputs as links, not file paths: `cc-publish <file> --title "Cut v2 · 9:16"` uploads to R2 (bucket `control-center-media`, Bearer `UPLOAD_TOKEN`), attaches the link to the task and prints it. Each file gets a private `/r/<token>` page: videos get a frame-accurate player (frame stepping, timeline markers) where Chris and the team leave notes on exact frames (with a still of each), then **Approve** or **Request changes**; images, PDFs and HTML pages open inline (HTML sandboxed). Notes are stored quietly; the decision is posted to the task as one `reviewer` comment listing every note with its timecode, lands in the inbox, and the runner types it into the waiting agent session, which makes the next version or wraps up.
+
+`cc-publish --completes-task` makes approval the end of the task: approving marks the task `done` and posts the decision, which says so only if that worked. Any approved stage waiting on it then starts. Requesting changes works as usual. The runner types any undelivered comment into a done task's session before asking it to clean up, so the session still sees the decision.
 
 ## Runner (`runner/`)
 

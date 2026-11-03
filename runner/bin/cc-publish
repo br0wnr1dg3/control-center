@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Publish a file to the Control Center review page and attach the link to the task.
 //
-//   cc-publish <file> [--title "Cut v2 · 9:16"] [--task 52]
+//   cc-publish <file> [--title "Cut v2 · 9:16"] [--task 52] [--completes-task]
 //
+// --completes-task: approving this review marks the task done, which frees anything waiting on it.
 // Prints the review link. The task defaults to $CC_TASK_ID (set for runner sessions). Videos get a
 // frame-accurate review page; HTML pages and PDFs fill the window; Markdown and text read as a document
 // reviewers can comment on passage by passage; images are shown inline; anything else downloads.
@@ -25,11 +26,14 @@ const flag = (name) => {
   const i = args.indexOf(`--${name}`);
   return i >= 0 ? args.splice(i, 2)[1] : undefined;
 };
+const completesAt = args.indexOf("--completes-task");
+const completesTask = completesAt >= 0;
+if (completesTask) args.splice(completesAt, 1);
 const title = flag("title");
 const task = flag("task") ?? process.env.CC_TASK_ID;
 const file = args[0];
 if (!file || !task) {
-  console.error("usage: cc-publish <file> [--title <title>] [--task <id>]   (task defaults to $CC_TASK_ID)");
+  console.error("usage: cc-publish <file> [--title <title>] [--task <id>] [--completes-task]   (task defaults to $CC_TASK_ID)");
   process.exit(1);
 }
 
@@ -48,6 +52,7 @@ const url = new URL("/api/publish", base);
 url.searchParams.set("task", String(task).replace(/^cc-/i, ""));
 url.searchParams.set("filename", basename(file));
 url.searchParams.set("title", title ?? basename(file));
+if (completesTask) url.searchParams.set("completes_task", "1");
 
 const res = await fetch(url, {
   method: "PUT",

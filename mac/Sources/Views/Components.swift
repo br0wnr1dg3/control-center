@@ -105,6 +105,48 @@ enum TaskDrag {
 // MARK: - Task rows
 
 /// List row used in Today, Upcoming and the popover.
+struct WaitingBadge: View {
+    let task: BoardTask
+
+    var body: some View {
+        Label(task.waitingLabel, systemImage: "hourglass")
+            .font(.system(size: 10, weight: .medium))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.secondary.opacity(0.15), in: Capsule())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .fixedSize()
+    }
+}
+
+/// One side of a dependency. The other task may be finished long ago and not loaded, so this draws from
+/// its own details and only opens what the store has.
+struct LinkedTaskRow: View {
+    let task: BoardTask.LinkedTask
+    var store = BoardStore.shared
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: task.kind == .agent ? "sparkles" : "circle.dashed")
+                .foregroundStyle(task.kind == .agent ? Color.purple : Color.secondary)
+                .frame(width: 16)
+            Text(task.title)
+                .strikethrough(task.status == .done || task.status == .cancelled)
+                .foregroundStyle(task.status.isOpen ? .primary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 4)
+            StatusPill(status: task.status)
+            Text(task.key).font(.caption.monospacedDigit()).foregroundStyle(.tertiary).fixedSize()
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .contentShape(Rectangle())
+        .onTapGesture { if store.task(task.id) != nil { store.open(task.id) } }
+    }
+}
+
 struct TaskRow: View {
     let task: BoardTask
     var showDate = false
@@ -154,6 +196,7 @@ struct TaskRow: View {
                     .buttonStyle(.borderless)
                     .font(.caption)
             }
+            if task.isWaiting { WaitingBadge(task: task) }
             if task.kind == .agent || task.status == .new {
                 StatusPill(status: task.status)
             }

@@ -1,6 +1,6 @@
 // Reviews: agents publish renders and other outputs to R2 and get a private link to a review page.
 //
-//   PUT  /api/publish?task=<id>&title=<t>&filename=<f>   upload (Bearer UPLOAD_TOKEN), returns the link
+//   PUT  /api/publish?task=<id>&title=<t>&filename=<f>[&completes_task=1]   upload (Bearer UPLOAD_TOKEN), returns the link
 //   GET  /r/<team>/<token>                                review page (/r/<token> redirects here)
 //   GET  /r/<token>/file                                  the file (Range requests, for scrubbing)
 //   GET  /r/<token>/data                                  review, task and notes as JSON
@@ -11,7 +11,9 @@
 // The link is the access control (a long random token), which is fine for the owner and their team; the team
 // key in the path is only there so a link says whose work it is, and is ignored when matching. Notes
 // are stored already delivered; the decision is posted to the task as one comment listing them, so a
-// waiting agent gets the whole review at once.
+// waiting agent gets the whole review at once. With completes_task, approving also marks the task done,
+// which frees whatever was waiting on it (task_dependencies); the runner still delivers the decision to
+// the session before asking it to clean up.
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
@@ -26,6 +28,7 @@ type Review = {
   content_type: string | null;
   size: number | null;
   status: "open" | "approved" | "changes_requested";
+  completes_task: boolean;
   decided_by: string | null;
   decided_at: string | null;
   created_at: string;
@@ -115,7 +118,15 @@ async function publish(request: Request, env: ReviewEnv, url: URL) {
 
   const { data: review, error } = await db
     .from("reviews")
-    .insert({ token, task_id: taskId, title, object_key: key, content_type: contentType, size: stored.size })
+    .insert({
+      token,
+      task_id: taskId,
+      title,
+      object_key: key,
+      content_type: contentType,
+      size: stored.size,
+      completes_task: url.searchParams.get("completes_task") === "1",
+    })
     .select()
     .single<Review>();
   if (error) return json({ error: error.message }, 500);
@@ -176,6 +187,7 @@ async function data(db: SupabaseClient, review: Review) {
       content_type: review.content_type,
       filename: review.object_key.split("/").pop(),
       decided_by: review.decided_by,
+      completes_task: review.completes_task,
     },
     task: task.data,
     notes: notes.data ?? [],
@@ -254,7 +266,26 @@ async function decide(request: Request, db: SupabaseClient, review: Review) {
   );
   const message = input.message?.trim();
   const headline = decision === "approved" ? `Approved "${review.title}"` : `Changes requested on "${review.title}"`;
-  const body = [headline + (message ? `: ${message}` : "."), lines.length ? `Notes:\n${lines.join("\n")}` : ""]
+  // Done before the comment, which only says so if it worked. Should the runner look in between, it asks
+  // the session to clean up first and types the decision on its next poll: the window stays open for that.
+  let completed = false;
+  let completeError: string | null = null;
+  if (decision === "approved" && review.completes_task) {
+    // A task that was cancelled in the meantime stays cancelled.
+    const { data: finished, error } = await db
+      .from("tasks")
+      .update({ status: "done", question: null })
+      .eq("id", review.task_id)
+      .not("status", "in", "(done,cancelled)")
+      .select("id");
+    completeError = error?.message ?? null;
+    completed = Boolean(finished?.length);
+  }
+  const body = [
+    headline + (message ? `: ${message}` : "."),
+    lines.length ? `Notes:\n${lines.join("\n")}` : "",
+    completed ? `This approval completes CC-${review.task_id}: it's now marked done, so there's nothing more to do on it.` : "",
+  ]
     .filter(Boolean)
     .join("\n\n");
 
@@ -266,7 +297,18 @@ async function decide(request: Request, db: SupabaseClient, review: Review) {
     body,
     review_id: review.id,
   });
-  return error ? json({ error: error.message }, 500) : json({ ok: true, status: decision });
+  if (error) return json({ error: error.message }, 500);
+  if (completed) {
+    await db.from("task_events").insert({
+      task_id: review.task_id,
+      kind: "status",
+      body: `done: ${name} approved "${review.title}"`,
+      actor: "reviewer",
+    });
+  }
+  // The decision is recorded and on its way to the agent, but the reviewer should know the task isn't done.
+  if (completeError) return json({ error: `Decision sent, but the task couldn't be marked done: ${completeError}` }, 500);
+  return json({ ok: true, status: decision, completed_task: completed });
 }
 
 const clip = (text: string) => {
@@ -419,6 +461,7 @@ const REVIEW_PAGE = String.raw`<!doctype html>
         <button class="ok" id="approve">Approve</button>
       </div>
       <p class="muted" id="decisionState"></p>
+      <p class="muted" id="decisionHint" hidden>Approving completes this task.</p>
     </div>
   </aside>
 </main>
@@ -652,7 +695,9 @@ async function decide(decision) {
   for (const b of [$("approve"), $("changes")]) b.disabled = false;
   if (!res.ok) { $("decisionState").textContent = "Couldn't send: " + (await res.text()); return; }
   $("message").value = "";
-  $("decisionState").textContent = decision === "approve" ? "Approved. The agent will wrap up." : "Sent. The agent is working on the next version.";
+  const reply = await res.json();
+  $("decisionState").textContent = decision !== "approve" ? "Sent. The agent is working on the next version."
+    : reply.completed_task ? "Approved. The task is done." : "Approved. The agent will wrap up.";
   load();
 }
 $("approve").onclick = () => decide("approve");
@@ -726,6 +771,7 @@ async function load() {
   const team = d.task.team, link = (token) => "/r/" + (team ? team.key + "/" : "") + token;
   $("status").textContent = { open: "Waiting for review", approved: "Approved", changes_requested: "Changes requested" }[d.review.status];
   $("status").className = "badge " + d.review.status;
+  $("decisionHint").hidden = !d.review.completes_task;
   $("task").textContent = (team ? team.name + " · " : "") + "CC-" + d.task.id + " · " + d.task.title;
   const mine = stem(d.review.title);
   const same = d.versions.filter((v) => stem(v.title) === mine);

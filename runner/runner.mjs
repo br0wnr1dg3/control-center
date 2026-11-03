@@ -333,7 +333,7 @@ How to work:
 - Anything only a human can or should do (posting publicly, sending messages or email as ${OWNER}, payments, calls, logging into accounts, physical errands): prepare everything, then call add_human_task(parent_id=${id}, ...) with exact instructions and any drafts. Do not do those yourself unless the description explicitly says to.
 - If you've done your part but the rest of this task is ${OWNER}'s (decisions, posting, steps they have to do), hand it back instead of completing it: update_task(id=${id}, kind="human", status="ready", log="<what you did; what's left for ${OWNER}>"). For a separate human step on a task you are finishing, use add_human_task. Never set status "new".
 - Share outputs as links, not file paths: \`cc-publish <file> --title "<what it is, e.g. Cut v2 · 9:16>"\` uploads it, attaches it to this task and prints a link. Videos get a review page where ${OWNER} and the team comment on exact frames; HTML pages and PDFs fill the window; images open inline. Publish written work (posts, scripts, concepts, briefs) as a .md file: it reads as a document and reviewers comment on the exact passage.
-- When a video or other output needs sign-off (a cut, a design, a page, a draft), publish it, say what changed and give the link, then stop and wait. ${OWNER} or the team review it and their decision arrives here as "Review from <name>: Approved ..." or "Changes requested ..." with notes, each tied to a timecode (with a still of the frame you can open) or to a quoted passage. For changes, make the next version, publish it with the next version number, and wait again. Once approved, finish up.
+- When a video or other output needs sign-off (a cut, a design, a page, a draft), publish it, say what changed and give the link, then stop and wait. ${OWNER} or the team review it and their decision arrives here as "Review from <name>: Approved ..." or "Changes requested ..." with notes, each tied to a timecode (with a still of the frame you can open) or to a quoted passage. For changes, make the next version, publish it with the next version number, and wait again. Once approved, finish up. If approval is all that's left of this task (nothing to do afterwards, or the description asks for it), publish with --completes-task: approving then marks the task done for you and frees any stage waiting on it.
 - When finished, call complete_task(id=${id}, summary=...) with what you did and where outputs are. The runner then asks you to clean up (stop what you started, remove the worktree if it's safe) and closes this window a few minutes later; the session can be resumed from the board if needed.
 - Only work on this task.`,
   ];
@@ -481,6 +481,19 @@ const closeFailures = new Set();
 async function closeOne(task, workspace) {
   let since = task.completed_at ?? task.updated_at;
   if (task.status === "done") {
+    // A review approval can itself finish the task, so the decision may still be on its way to the
+    // session. It goes first, and the cleanup ask waits a poll so they don't arrive as one.
+    const pending = await undeliveredComments(task.id);
+    if (pending.length) {
+      try {
+        await typeInto(workspace, formatComments(pending));
+        await markDelivered(pending);
+        log(`delivered ${pending.length} comment(s) to done CC-${task.id}`);
+        return;
+      } catch (err) {
+        log(`CC-${task.id}: couldn't deliver comments before cleanup:`, err.message); // a dead window still closes
+      }
+    }
     const asked = await cleanupAskedAt(task);
     if (!asked) {
       // Recorded even if typing fails, so a dead window still closes; cleanupWorktrees is the backstop.
@@ -684,8 +697,8 @@ async function updateDue() {
 
 // ---------- Main loop ----------
 
-async function tick() {
-  const tasks = await db("tasks?kind=eq.agent&status=in.(ready,in_progress,needs_you)&select=*&order=sort_order,id");
+export async function tick() {
+  const tasks = await db("tasks?kind=eq.agent&status=in.(ready,in_progress,needs_you)&select=*,waiting_on&order=sort_order,id");
   // priority 0 means none, so sort urgent (1) .. low (4) first and none last.
   tasks.sort((a, b) => (a.priority || 5) - (b.priority || 5));
   const workspaces = await taskWorkspaces();
@@ -732,6 +745,8 @@ async function tick() {
         await markDelivered(pending);
         await patchTask(task.id, { status: "in_progress" });
         log(`delivered answer to CC-${task.id}`);
+      } else if (task.waiting_on?.length) {
+        continue; // approved, but its blockers aren't finished (a live session above has already started)
       } else if (task.scheduled_on && task.scheduled_on > localDay()) {
         continue; // scheduled for a later day
       } else if (running < CONFIG.maxConcurrent) {
