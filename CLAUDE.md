@@ -3,7 +3,7 @@
 A personal task board driven by Claude. Four parts share one Supabase Postgres database; see README.md for what each does.
 
 - `supabase/migrations/`: schema and triggers. Inbox notifications, @agent hand-offs, project/team sync, hand-back and answered-question behaviour all live in triggers, so every client agrees.
-- `mcp/`: Cloudflare Worker. MCP tools (`src/tools.ts`, behind passphrase OAuth), email capture (`src/email.ts`, AgentMail + Claude Haiku triage), review links (`src/review.ts`, R2).
+- `mcp/`: Cloudflare Worker. MCP tools (`src/tools.ts`, behind passphrase OAuth), email capture (`src/email.ts`, AgentMail + Claude Haiku triage), review links (`src/review.ts`, R2), signed inbound events from other apps (`src/inbound.ts`, applied by `apply_inbound_event` in Postgres).
 - `runner/`: launchd agent that starts each ready agent task as an interactive `claude` session in a cmux workspace (worktree, Remote Control, session hooks), delivers comments, closes finished sessions, cleans merged worktrees and publishes the repo inventory. `hooks/session-state.mjs` keeps the board in step with the terminal; `bin/cc-publish` uploads outputs for review.
 - `mac/`: SwiftUI app (SwiftPM, no Xcode project): Inbox, Today, Upcoming, Board, task pages, team settings, menu bar, ⌃⌥Space composer.
 
@@ -46,5 +46,6 @@ Production is deployed from this machine, not from GitHub, and the runner execut
 - `claude --allowedTools` is variadic and eats a following positional prompt; the prompt goes first in `run.sh`.
 - Session hooks read the hook script from this checkout each time, so hook edits apply to running sessions immediately; prompt and settings changes only apply to new sessions.
 - AgentMail's `extracted_text` includes Gmail forwards; `email.ts` cuts the owner's own note itself before honouring `@agent`.
+- Task titles can come from outside apps (inbound events), so anything written into a shell script goes through `shellQuote`; `JSON.stringify` still expands `$(...)`.
 - PostgREST: duplicate `or=` params AND together; embedded filters use `table.column` (e.g. `local_repos.hidden`).
 - Supabase local DB clock is UTC; day-based views use the owner's timezone, so "today" can differ in local tests.

@@ -22,7 +22,7 @@ const views = ["today", "upcoming", "new", "agent_ready", "needs_you", "human", 
 
 const OPEN = "(done,cancelled)";
 const LIST_FIELDS =
-  "id,title,kind,status,priority,team:teams(key,name),project,labels,scheduled_on,due,today,parent_id,question,updated_at,waiting_on";
+  "id,title,kind,status,priority,team:teams(key,name),project,labels,scheduled_on,due,today,parent_id,question,updated_at,waiting_on,external_ref,requested_by";
 
 // Accept 12, "12" or "CC-12".
 const taskId = z.preprocess(

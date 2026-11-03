@@ -4,6 +4,10 @@ OWNER_PASSPHRASE=<long random passphrase>
 PUBLIC_URL=http://localhost:8787
 UPLOAD_TOKEN=local-upload-token
 
+# Inbound events, one secret per team: INBOUND_SECRET_<TEAM KEY>. The smoke test uses these two.
+INBOUND_SECRET_SMOKE_CO=local-inbound-secret
+INBOUND_SECRET_SMOKE_OTHER=local-inbound-secret
+
 # Email capture (optional)
 AGENTMAIL_INBOX=you@agentmail.to
 ALLOWED_SENDERS=you@example.com
