@@ -445,25 +445,39 @@ export async function closeFinished(workspaces, activeIds) {
   const tasks = await db(
     `tasks?id=in.(${ids.join(",")})&or=(status.in.(done,cancelled,new),kind.neq.agent)&select=id,status,completed_at,updated_at,worktree`,
   );
+  // One task at a time: a window cmux won't close must not stop every other done task from being
+  // asked to clean up and closed (that stalled all of them behind one stuck workspace).
   for (const task of tasks) {
-    const workspace = workspaces.get(task.id);
-    let since = task.completed_at ?? task.updated_at;
-    if (task.status === "done") {
-      const asked = await cleanupAskedAt(task);
-      if (!asked) {
-        // Recorded even if typing fails, so a dead window still closes; cleanupWorktrees is the backstop.
-        await typeInto(workspace, cleanupPrompt(task)).catch((err) => log(`CC-${task.id}: couldn't ask for cleanup:`, err.message));
-        await addEvent(task.id, "status", CLEANUP_ASKED);
-        log(`asked CC-${task.id} to clean up`);
-        continue;
-      }
-      since = asked;
+    try {
+      await closeOne(task, workspaces.get(task.id));
+    } catch (err) {
+      const key = `${task.id}:${err.message}`;
+      if (!closeFailures.has(key)) log(`close CC-${task.id}:`, err.message, err.stderr?.trim() ?? "");
+      closeFailures.add(key);
     }
-    if (task.status !== "cancelled" && minutesSince(since) < CONFIG.closeAfterMinutes) continue;
-    await cmux("close-workspace", "--workspace", workspace);
-    await addEvent(task.id, "status", "runner closed the session window");
-    log(`closed CC-${task.id} (${task.status})`);
   }
+}
+
+// Failures already logged, so a stuck window logs once rather than every poll.
+const closeFailures = new Set();
+
+async function closeOne(task, workspace) {
+  let since = task.completed_at ?? task.updated_at;
+  if (task.status === "done") {
+    const asked = await cleanupAskedAt(task);
+    if (!asked) {
+      // Recorded even if typing fails, so a dead window still closes; cleanupWorktrees is the backstop.
+      await typeInto(workspace, cleanupPrompt(task)).catch((err) => log(`CC-${task.id}: couldn't ask for cleanup:`, err.message));
+      await addEvent(task.id, "status", CLEANUP_ASKED);
+      log(`asked CC-${task.id} to clean up`);
+      return;
+    }
+    since = asked;
+  }
+  if (task.status !== "cancelled" && minutesSince(since) < CONFIG.closeAfterMinutes) return;
+  await cmux("close-workspace", "--workspace", workspace);
+  await addEvent(task.id, "status", "runner closed the session window");
+  log(`closed CC-${task.id} (${task.status})`);
 }
 
 async function git(cwd, ...args) {
