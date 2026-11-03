@@ -35,7 +35,7 @@ Production is deployed from this machine, not from GitHub, and the runner execut
 - The repo is public. Personal data (teams, GitHub orgs, folders, branches, email addresses) stays out of it: use `supabase/seed.local.sql` (git-ignored) or the app's settings. The owner's name comes from `OWNER_NAME` / `CC_OWNER_NAME`.
 - Agents run with `--dangerously-skip-permissions` (the owner's explicit choice). Guardrails are in the runner prompt: human-only actions become `add_human_task`, PRs are never merged unless asked, outputs are shared with `cc-publish`.
 - Statuses: `new` = untriaged, `ready` = approved (agent tasks run on their `scheduled_on` day), `needs_you` = an agent is blocked on the owner, `done`/`cancelled`. A finished agent hands remaining human steps back with kind `human`, status `ready`.
-- Stages: `task_dependencies` triggers move a `new` task to `ready` when all its blockers are `done`, or to `needs_you` when one is cancelled (see README). They never touch any other status.
+- Stages: `blocked_by` delays a task, it doesn't approve it. No trigger moves a task to `ready`; the runner skips `ready` tasks with open blockers (`waiting_on`, see README), and a cancelled blocker moves a `new` or `ready` task to `needs_you`.
 - Worktrees are created by the runner from a fresh `origin/<base branch>` (repo setting → team default → GitHub default) at `<repo>/.claude/worktrees/cc-<id>`; cleanup only removes them when merged and nothing would be lost (`branch -d`, never `-D`).
 - Code style: match the file you're in; comments explain why, not what. Swift uses `@Observable` `BoardStore.shared`; API calls go through `BoardAPI` (PostgREST). The Worker uses `@supabase/supabase-js` and zod schemas for tools.
 

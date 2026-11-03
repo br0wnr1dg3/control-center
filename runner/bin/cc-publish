@@ -3,7 +3,7 @@
 //
 //   cc-publish <file> [--title "Cut v2 · 9:16"] [--task 52] [--completes-task]
 //
-// --completes-task: approving this review marks the task done, which starts anything waiting on it.
+// --completes-task: approving this review marks the task done, which frees anything waiting on it.
 // Prints the review link. The task defaults to $CC_TASK_ID (set for runner sessions). Videos get a
 // frame-accurate review page; HTML pages and PDFs fill the window; Markdown and text read as a document
 // reviewers can comment on passage by passage; images are shown inline; anything else downloads.

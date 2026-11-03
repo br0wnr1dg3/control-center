@@ -12,7 +12,7 @@
 // key in the path is only there so a link says whose work it is, and is ignored when matching. Notes
 // are stored already delivered; the decision is posted to the task as one comment listing them, so a
 // waiting agent gets the whole review at once. With completes_task, approving also marks the task done,
-// which starts whatever was waiting on it (task_dependencies); the runner still delivers the decision to
+// which frees whatever was waiting on it (task_dependencies); the runner still delivers the decision to
 // the session before asking it to clean up.
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
@@ -266,11 +266,25 @@ async function decide(request: Request, db: SupabaseClient, review: Review) {
   );
   const message = input.message?.trim();
   const headline = decision === "approved" ? `Approved "${review.title}"` : `Changes requested on "${review.title}"`;
-  const completes = decision === "approved" && review.completes_task;
+  // Done before the comment, which only says so if it worked. Should the runner look in between, it asks
+  // the session to clean up first and types the decision on its next poll: the window stays open for that.
+  let completed = false;
+  let completeError: string | null = null;
+  if (decision === "approved" && review.completes_task) {
+    // A task that was cancelled in the meantime stays cancelled.
+    const { data: finished, error } = await db
+      .from("tasks")
+      .update({ status: "done", question: null })
+      .eq("id", review.task_id)
+      .not("status", "in", "(done,cancelled)")
+      .select("id");
+    completeError = error?.message ?? null;
+    completed = Boolean(finished?.length);
+  }
   const body = [
     headline + (message ? `: ${message}` : "."),
     lines.length ? `Notes:\n${lines.join("\n")}` : "",
-    completes ? `This approval completes CC-${review.task_id}: it's now marked done, so there's nothing more to do on it.` : "",
+    completed ? `This approval completes CC-${review.task_id}: it's now marked done, so there's nothing more to do on it.` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -284,26 +298,17 @@ async function decide(request: Request, db: SupabaseClient, review: Review) {
     review_id: review.id,
   });
   if (error) return json({ error: error.message }, 500);
-
-  if (completes) {
-    // A task that was cancelled in the meantime stays cancelled.
-    const { data: finished, error: doneError } = await db
-      .from("tasks")
-      .update({ status: "done", question: null })
-      .eq("id", review.task_id)
-      .not("status", "in", "(done,cancelled)")
-      .select("id");
-    if (doneError) return json({ error: doneError.message }, 500);
-    if (finished?.length) {
-      await db.from("task_events").insert({
-        task_id: review.task_id,
-        kind: "status",
-        body: `done: ${name} approved "${review.title}"`,
-        actor: "reviewer",
-      });
-    }
+  if (completed) {
+    await db.from("task_events").insert({
+      task_id: review.task_id,
+      kind: "status",
+      body: `done: ${name} approved "${review.title}"`,
+      actor: "reviewer",
+    });
   }
-  return json({ ok: true, status: decision, completed_task: completes });
+  // The decision is recorded and on its way to the agent, but the reviewer should know the task isn't done.
+  if (completeError) return json({ error: `Decision sent, but the task couldn't be marked done: ${completeError}` }, 500);
+  return json({ ok: true, status: decision, completed_task: completed });
 }
 
 const clip = (text: string) => {

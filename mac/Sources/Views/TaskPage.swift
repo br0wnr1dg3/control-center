@@ -44,6 +44,8 @@ struct TaskPage: View {
                         .buttonStyle(.plain)
                     }
 
+                    if task.isWaiting { WaitingBadge(task: task) }
+
                     descriptionEditor
                     subtasks
                     dependencies
@@ -131,18 +133,16 @@ struct TaskPage: View {
 
     @ViewBuilder
     private var dependencies: some View {
-        let blockers = store.blockers(of: task)
-        let blocked = store.blocked(by: task.id)
-        if !blockers.isEmpty {
+        if let blockers = task.blockers, !blockers.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
                 SectionHeader(title: "Blocked by")
-                ForEach(blockers) { TaskRow(task: $0, showDate: true, hideProject: task.project) }
+                ForEach(blockers, id: \.task.id) { LinkedTaskRow(task: $0.task) }
             }
         }
-        if !blocked.isEmpty {
+        if let blocks = task.blocks, !blocks.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
                 SectionHeader(title: "Blocks")
-                ForEach(blocked) { TaskRow(task: $0, showDate: true, hideProject: task.project) }
+                ForEach(blocks, id: \.task.id) { LinkedTaskRow(task: $0.task) }
             }
         }
     }
@@ -303,18 +303,33 @@ struct ReplyCard: View {
     @State private var images: [PendingImage] = []
 
     private var questions: [AgentQuestion] { task.questionOptions ?? [] }
+    /// No session yet, e.g. a stage held back by a cancelled blocker: nothing is listening, and replying
+    /// is what lets the work go ahead.
+    private var hasSession: Bool { task.sessionId != nil }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
-                Image(systemName: "sparkles").foregroundStyle(.purple)
-                Text("Agent").font(.callout.weight(.semibold))
-                Text("is waiting on you").font(.callout).foregroundStyle(.secondary)
+                if hasSession {
+                    Image(systemName: "sparkles").foregroundStyle(.purple)
+                    Text("Agent").font(.callout.weight(.semibold))
+                    Text("is waiting on you").font(.callout).foregroundStyle(.secondary)
+                } else {
+                    Image(systemName: "questionmark.circle").foregroundStyle(.orange)
+                    Text("Your call").font(.callout.weight(.semibold))
+                }
                 Spacer()
-                Button { store.dismissQuestion(task) } label: { Label("Not needed", systemImage: "xmark") }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
-                    .help("Nothing to answer: back to In progress and out of your inbox")
+                if hasSession {
+                    Button { store.dismissQuestion(task) } label: { Label("Not needed", systemImage: "xmark") }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                        .help("Nothing to answer: back to In progress and out of your inbox")
+                } else {
+                    // "Not needed" means back to In progress, which would strand a task nothing is running.
+                    Button { store.setStatus(task, .cancelled) } label: { Label("Cancel task", systemImage: "xmark") }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                }
                 if Cmux.isInstalled && task.sessionId != nil {
                     Button { Cmux.openSession(taskId: task.id) } label: { Label("Open session", systemImage: "terminal") }
                         .buttonStyle(.borderless)
@@ -342,7 +357,8 @@ struct ReplyCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack(alignment: .topLeading) {
                     if text.isEmpty {
-                        Text(questions.isEmpty ? "Reply to the agent… (paste or drop screenshots)" : "Add detail, or answer something else…")
+                        Text(!questions.isEmpty ? "Add detail, or answer something else…"
+                             : hasSession ? "Reply to the agent… (paste or drop screenshots)" : "Add any guidance… (paste or drop screenshots)")
                             .font(.system(size: 14))
                             .foregroundStyle(.tertiary)
                             .padding(.leading, 5)
@@ -359,7 +375,7 @@ struct ReplyCard: View {
 
             HStack {
                 AttachImagesButton { images.append(contentsOf: $0) }
-                Text("⌘↩ sends · goes straight into the agent's session").font(.caption).foregroundStyle(.tertiary)
+                Text(hasSession ? "⌘↩ sends · goes straight into the agent's session" : "⌘↩ sends · marks it ready to go ahead").font(.caption).foregroundStyle(.tertiary)
                 Spacer()
                 Button("Send reply", action: send)
                     .buttonStyle(.borderedProminent)

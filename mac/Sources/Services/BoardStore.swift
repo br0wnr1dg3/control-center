@@ -102,8 +102,6 @@ final class BoardStore {
     }
 
     func subtasks(of id: Int) -> [BoardTask] { allTasks.filter { $0.parentId == id } }
-    func blockers(of task: BoardTask) -> [BoardTask] { (task.blockers ?? []).compactMap { self.task($0.id) } }
-    func blocked(by id: Int) -> [BoardTask] { allTasks.filter { $0.blockers?.contains { $0.id == id } == true } }
 
     // MARK: Sync
 

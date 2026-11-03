@@ -22,7 +22,7 @@ const views = ["today", "upcoming", "new", "agent_ready", "needs_you", "human", 
 
 const OPEN = "(done,cancelled)";
 const LIST_FIELDS =
-  "id,title,kind,status,priority,team:teams(key,name),project,labels,scheduled_on,due,today,parent_id,question,updated_at";
+  "id,title,kind,status,priority,team:teams(key,name),project,labels,scheduled_on,due,today,parent_id,question,updated_at,waiting_on";
 
 // Accept 12, "12" or "CC-12".
 const taskId = z.preprocess(
@@ -50,9 +50,9 @@ const linkedTasks = (rows: unknown[] | null) =>
 
 const blockedBy = z.array(taskId).optional();
 
-// Make a task's blockers exactly this list. New ones go in before old ones come out: the triggers settle
-// the task after each step, and removing first could briefly leave only finished blockers and start it.
-// Returns an error message, if any. The triggers own what this does to the task's status.
+// Make a task's blockers exactly this list. New ones go in before old ones come out: removing first could
+// leave a ready task briefly with nothing open, long enough for the runner to start it. Returns an error
+// message, if any. The triggers own what this does to the task's status.
 async function setBlockers(db: SupabaseClient, id: number, blockers: number[]): Promise<string | null> {
   const wanted = [...new Set(blockers)];
   if (wanted.includes(id)) return `CC-${id} can't be blocked by itself.`;
@@ -99,7 +99,7 @@ Writing a task
 - Description (Markdown): what and why in 1-2 lines, then the context someone starting cold needs (links, file paths, names), then a "Done when" checklist (- [ ] ...). For agent tasks also list constraints and where outputs go. Keep team-wide rules in the team briefing (save_team context), not in every task.
 - kind: 'agent' only if Claude can finish it alone with a computer; posting publicly, sending messages as ${o}, calls, payments, logins and errands are 'human'. Mixed work = an agent task whose agent hands the human step back with add_human_task, or separate sub-tasks.
 - Split work longer than a session into sub-tasks (parent_id) under one parent that holds the shared brief.
-- For stages that must run in order, pass blocked_by: a task stays new until every blocker is done, then becomes ready by itself (and an agent task starts, so only set it when ${o} has approved the whole job). If a blocker is cancelled the task moves to needs_you for ${o} to decide.
+- For stages that must run in order, pass blocked_by. It delays a task, it doesn't approve it: a ready task waits until its blockers finish, then an agent task starts by itself, while a new task still needs ${o}'s go-ahead. If a blocker is cancelled the task moves to needs_you for ${o} to decide.
 - Dates: scheduled_on = the day to do it (puts it on the calendar; agent tasks wait for it). due = a real deadline only. Use YYYY-MM-DD in ${o}'s timezone. today=true pins to today's list.
 - Status: new by default. Set ready=true only when ${o} says to go ahead: ready agent tasks are executed by the runner without further review.
 - Priority only when stated or obvious (1 urgent ... 4 low). Labels are lowercase tags for cross-cutting themes (linkedin, research), not a substitute for project.
@@ -153,7 +153,7 @@ export function buildServer(env: Env) {
         ready: z.boolean().optional().describe("Skip 'new'; agent tasks marked ready get picked up by the runner"),
         parent_id: taskId.optional(),
         blocked_by: blockedBy.describe(
-          "Tasks this one waits on. It stays new until they're all done, then becomes ready by itself, even without ready=true; if one is cancelled it moves to needs_you",
+          "Tasks this one waits on. This delays it, it doesn't approve it: with ready=true it starts once they're done, without it stays new. If one is cancelled it moves to needs_you",
         ),
         source: z.string().optional(),
       }),
@@ -167,7 +167,7 @@ export function buildServer(env: Env) {
       }
       const { data, error } = await db
         .from("tasks")
-        // Blocked work waits: starting as ready would let the runner begin it straight away.
+        // Ready only once the blockers are in, or the runner could start it in between.
         .insert({ ...fields, team_id, status: ready && !blocked_by?.length ? "ready" : "new" })
         .select()
         .single();
@@ -178,8 +178,9 @@ export function buildServer(env: Env) {
         await db.from("tasks").delete().eq("id", data.id); // don't leave a half-made task to be retried beside
         return fail(problem);
       }
-      // Re-read: the blockers may already be finished, which settles the status.
-      const { data: settled } = await db.from("tasks").select("*").eq("id", data.id).single();
+      if (ready) await db.from("tasks").update({ status: "ready" }).eq("id", data.id).eq("status", "new");
+      // Re-read: a blocker that's already cancelled moves it to needs_you.
+      const { data: settled } = await db.from("tasks").select("*,waiting_on").eq("id", data.id).single();
       return ok({ ...withKey(settled), blocked_by: [...new Set(blocked_by)] });
     },
   );
@@ -212,6 +213,8 @@ export function buildServer(env: Env) {
         case "today": {
           const today = todayISO(timeZone);
           q = q.not("status", "in", OPEN).or(`today.eq.true,scheduled_on.lte.${today},due.lte.${today}`);
+          // Ready work for the owner that can't be done yet isn't for today.
+          q = q.or('kind.eq.agent,status.neq.ready,waiting_on.eq."{}"');
           break;
         }
         case "upcoming":
@@ -223,7 +226,7 @@ export function buildServer(env: Env) {
           q = q.eq("status", "new");
           break;
         case "agent_ready":
-          q = q.eq("status", "ready").eq("kind", "agent")
+          q = q.eq("status", "ready").eq("kind", "agent").eq("waiting_on", "{}")
             .or(`scheduled_on.is.null,scheduled_on.lte.${todayISO(timeZone)}`);
           break;
         case "needs_you":
@@ -272,7 +275,7 @@ export function buildServer(env: Env) {
     },
     async ({ id }) => {
       const [task, children, blockers, blocking, comments, events] = await Promise.all([
-        db.from("tasks").select("*,team:teams(key,name)").eq("id", id).single(),
+        db.from("tasks").select("*,waiting_on,team:teams(key,name)").eq("id", id).single(),
         db.from("tasks").select("id,title,kind,status").eq("parent_id", id).order("id"),
         db.from("task_dependencies").select("task:tasks!blocked_by_id(id,title,kind,status)").eq("task_id", id).order("blocked_by_id"),
         db.from("task_dependencies").select("task:tasks!task_id(id,title,kind,status)").eq("blocked_by_id", id).order("task_id"),
@@ -328,7 +331,7 @@ export function buildServer(env: Env) {
         today: z.boolean().optional(),
         parent_id: taskId.nullable().optional(),
         blocked_by: blockedBy.describe(
-          "Replaces the tasks this one waits on ([] clears them). A task still new advances when they're all done; other statuses are left alone",
+          "Replaces the tasks this one waits on ([] clears them). This delays the task, it doesn't approve it or change its status",
         ),
         sort_order: z.number().optional(),
         session_id: z.string().optional(),
@@ -365,7 +368,7 @@ export function buildServer(env: Env) {
       }
       if (log) await logEvent(db, id, "agent_log", log, actor ?? "claude");
       if (fields.status) await logEvent(db, id, "status", fields.status, actor ?? "claude");
-      const { data } = await db.from("tasks").select("*").eq("id", id).single();
+      const { data } = await db.from("tasks").select("*,waiting_on").eq("id", id).single();
       return ok(blocked_by ? { ...withKey(data), blocked_by: [...new Set(blocked_by)] } : withKey(data));
     },
   );

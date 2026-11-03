@@ -62,7 +62,7 @@ struct BoardAPI {
     /// Open tasks plus anything finished in the last two weeks (done history for day views).
     func fetchTasks() async throws -> [BoardTask] {
         let since = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-14 * 86400))
-        return try await get("tasks?select=*,blockers:task_dependencies!task_id(blocked_by_id)&or=(status.not.in.(done,cancelled),completed_at.gt.\(since))&order=sort_order,id")
+        return try await get("tasks?select=*,waiting_on,blockers:task_dependencies!task_id(task:tasks!blocked_by_id(id,title,status,kind)),blocks:task_dependencies!blocked_by_id(task:tasks!task_id(id,title,status,kind))&or=(status.not.in.(done,cancelled),completed_at.gt.\(since))&order=sort_order,id")
     }
 
     func fetchTeams() async throws -> [Team] {
