@@ -238,10 +238,14 @@ final class BoardStore {
         return draft
     }
 
-    func create(_ fields: [String: Any], open: Bool) {
+    func create(_ fields: [String: Any], files: [PendingFile] = [], open: Bool) {
         Task {
             do {
-                let task = try await client().addTask(fields)
+                let api = try client()
+                // Files go up before the row exists, so a ready agent task is never picked up without them.
+                var fields = fields
+                if !files.isEmpty { fields["attachments"] = try await Self.upload(files, to: "new", with: api).map(\.json) }
+                let task = try await api.addTask(fields)
                 await refresh()
                 if open { selectedTaskId = task.id }
             } catch {
@@ -293,7 +297,7 @@ final class BoardStore {
         update(task, ["scheduled_on": day ?? NSNull()]) { $0.scheduledOn = day }
     }
 
-    func answer(_ task: BoardTask, with text: String, images: [PendingImage] = []) {
+    func answer(_ task: BoardTask, with text: String, images: [PendingFile] = []) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !images.isEmpty else { return }
         // Keep the question in the history: questions caught from a session aren't comments yet.
@@ -303,7 +307,7 @@ final class BoardStore {
             if let question, !question.isEmpty, !alreadyPosted {
                 try await api.addComment(task.id, body: question, author: "agent")
             }
-            try await api.addComment(task.id, body: text, attachments: try await Self.upload(images, to: task.id, with: api))
+            try await api.addComment(task.id, body: text, attachments: try await Self.upload(images, to: String(task.id), with: api))
             try await api.update(task.id, ["status": "ready", "question": NSNull()], onlyIfStatus: .needs_you)
         }
     }
@@ -315,30 +319,35 @@ final class BoardStore {
         }
     }
 
-    /// Images go up before the comment row, so the runner never sees a comment whose files aren't there yet.
-    private static func upload(_ images: [PendingImage], to taskId: Int, with api: BoardAPI) async throws -> [CommentAttachment] {
-        var stored: [CommentAttachment] = []
-        for image in images { stored.append(try await api.uploadImage(image, taskId: taskId)) }
+    /// Files go up before the task or comment row, so the runner never sees one whose files aren't there yet.
+    private static func upload(_ files: [PendingFile], to folder: String, with api: BoardAPI) async throws -> [FileAttachment] {
+        var stored: [FileAttachment] = []
+        for file in files { stored.append(try await api.uploadFile(file, folder: folder)) }
         return stored
     }
+
+    /// Shows a problem in the usual error banner (e.g. a file too big to attach).
+    func report(_ message: String) { lastError = message }
 
     @ObservationIgnored private var imageCache: [String: NSImage] = [:]
 
     /// A comment's image, fetched with the service key (the bucket is private) and kept for the session.
     func image(at path: String) async -> NSImage? {
         if let cached = imageCache[path] { return cached }
-        guard let data = try? await client().downloadImage(path), let image = NSImage(data: data) else { return nil }
+        guard let data = try? await client().downloadFile(path), let image = NSImage(data: data) else { return nil }
         imageCache[path] = image
         return image
     }
 
-    /// Full size in the default viewer (Preview), from a temporary copy.
-    func openImage(_ attachment: CommentAttachment) {
+    /// In its default app (Preview for images), from a temporary copy under its own name.
+    func openFile(_ attachment: FileAttachment) {
         Task {
             do {
-                let data = try await client().downloadImage(attachment.path)
-                let url = FileManager.default.temporaryDirectory
+                let data = try await client().downloadFile(attachment.path)
+                let dir = FileManager.default.temporaryDirectory
                     .appendingPathComponent("cc-\(attachment.path.replacingOccurrences(of: "/", with: "-"))")
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let url = dir.appendingPathComponent(attachment.name.replacingOccurrences(of: "/", with: "-"))
                 try data.write(to: url)
                 NSWorkspace.shared.open(url)
             } catch {
@@ -347,13 +356,13 @@ final class BoardStore {
         }
     }
 
-    func comment(on task: BoardTask, _ text: String, images: [PendingImage] = []) {
+    func comment(on task: BoardTask, _ text: String, images: [PendingFile] = []) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !images.isEmpty else { return }
         Task {
             do {
                 let api = try client()
-                try await api.addComment(task.id, body: text, attachments: try await Self.upload(images, to: task.id, with: api))
+                try await api.addComment(task.id, body: text, attachments: try await Self.upload(images, to: String(task.id), with: api))
             } catch {
                 lastError = error.localizedDescription
             }

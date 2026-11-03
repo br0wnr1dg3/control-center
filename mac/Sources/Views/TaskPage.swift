@@ -9,7 +9,7 @@ struct TaskPage: View {
 
     @State private var title = ""
     @State private var comment = ""
-    @State private var images: [PendingImage] = []
+    @State private var images: [PendingFile] = []
     @State private var newSubtask = ""
     @FocusState private var editingTitle: Bool
     @State private var scroller: ScrollViewProxy?
@@ -45,6 +45,7 @@ struct TaskPage: View {
                     }
 
                     descriptionEditor
+                    if let files = task.attachments, !files.isEmpty { AttachmentList(attachments: files) }
                     subtasks
                     links
                     Divider()
@@ -234,13 +235,13 @@ struct TaskPage: View {
                     ComposerTextView(text: $comment, fontSize: 13) { images.append(contentsOf: $0) }
                         .frame(minHeight: 54, maxHeight: 180)
                 }
-                PendingImagesStrip(images: $images)
+                PendingFilesStrip(images: $images)
             }
             .padding(10)
             .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
             HStack {
-                AttachImagesButton { images.append(contentsOf: $0) }
+                AttachFilesButton { images.append(contentsOf: $0) }
                 Spacer()
                 Button("Comment", action: sendComment)
                     .keyboardShortcut(.return, modifiers: .command)
@@ -281,7 +282,7 @@ struct ReplyCard: View {
     var store = BoardStore.shared
     @State private var picked: [Int: Set<String>] = [:]
     @State private var text = ""
-    @State private var images: [PendingImage] = []
+    @State private var images: [PendingFile] = []
 
     private var questions: [AgentQuestion] { task.questionOptions ?? [] }
 
@@ -332,14 +333,14 @@ struct ReplyCard: View {
                     ComposerTextView(text: $text, fontSize: 14) { images.append(contentsOf: $0) }
                         .frame(minHeight: 90, maxHeight: 260)
                 }
-                PendingImagesStrip(images: $images)
+                PendingFilesStrip(images: $images)
             }
             .padding(10)
             .background(Color(nsColor: .textBackgroundColor).opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.35)))
 
             HStack {
-                AttachImagesButton { images.append(contentsOf: $0) }
+                AttachFilesButton { images.append(contentsOf: $0) }
                 Text("⌘↩ sends · goes straight into the agent's session").font(.caption).foregroundStyle(.tertiary)
                 Spacer()
                 Button("Send reply", action: send)
@@ -449,7 +450,7 @@ struct CommentBubble: View {
                     }
                 }
                 if let attachments = comment.attachments, !attachments.isEmpty {
-                    CommentImages(attachments: attachments)
+                    AttachmentList(attachments: attachments)
                 }
             }
             Spacer(minLength: 0)
