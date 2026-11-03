@@ -18,7 +18,7 @@ Production is deployed from this machine, not from GitHub, and the runner execut
 ### Local testing
 
 - Database: `supabase start` (ports 577xx; other projects use 543xx/553xx/564xx). `supabase db reset --local` rebuilds from migrations; load the owner's teams with `docker exec -i supabase_db_control-center psql -U postgres < supabase/seed.local.sql` (psql isn't installed on the host).
-- Worker: `cd mcp && npx wrangler dev --port 8787` (reads `.dev.vars`: local Supabase URL and demo service key). Smoke test: `node scripts/smoke.mjs` (local) or `node scripts/smoke.mjs <prod url> <passphrase>`; it leaves `source=smoke` rows to delete afterwards. Team-writing checks only run locally.
+- Worker: `cd mcp && npx wrangler dev --port 8787` (reads `.dev.vars`: local Supabase URL and demo service key). Smoke test: `node scripts/smoke.mjs` (local) or `node scripts/smoke.mjs <prod url> <passphrase>`; it leaves `source=smoke` rows to delete afterwards. Team-writing checks only run locally; set `CC_UPLOAD_TOKEN` (`UPLOAD_TOKEN` in `.dev.vars`) to also check reviews that complete their task.
 - App: `cd mac && swift build`, then `CC_SUPABASE_URL=http://127.0.0.1:57721 CC_SERVICE_KEY=<demo key> .build/debug/ControlCenterBoard`. `CC_SECTION=inbox|upcoming|board|team:<id>`, `CC_SELECT=<task id>` and `CC_COMPOSE=1` open a specific view for screenshots. Capture only the app window (`screencapture -l <window id>`), never the whole screen.
 - Runner pieces: `runner.mjs` only starts its loop when run directly, so tests can `import { workRepo, cleanupWorktree, syncRepos, ... }`. Don't run the real runner against local data with ready agent tasks in it: it opens real Claude sessions.
 
@@ -35,6 +35,7 @@ Production is deployed from this machine, not from GitHub, and the runner execut
 - The repo is public. Personal data (teams, GitHub orgs, folders, branches, email addresses) stays out of it: use `supabase/seed.local.sql` (git-ignored) or the app's settings. The owner's name comes from `OWNER_NAME` / `CC_OWNER_NAME`.
 - Agents run with `--dangerously-skip-permissions` (the owner's explicit choice). Guardrails are in the runner prompt: human-only actions become `add_human_task`, PRs are never merged unless asked, outputs are shared with `cc-publish`.
 - Statuses: `new` = untriaged, `ready` = approved (agent tasks run on their `scheduled_on` day), `needs_you` = an agent is blocked on the owner, `done`/`cancelled`. A finished agent hands remaining human steps back with kind `human`, status `ready`.
+- Stages: `task_dependencies` triggers move a `new` task to `ready` when all its blockers are `done`, or to `needs_you` when one is cancelled (see README). They never touch any other status.
 - Worktrees are created by the runner from a fresh `origin/<base branch>` (repo setting → team default → GitHub default) at `<repo>/.claude/worktrees/cc-<id>`; cleanup only removes them when merged and nothing would be lost (`branch -d`, never `-D`).
 - Code style: match the file you're in; comments explain why, not what. Swift uses `@Observable` `BoardStore.shared`; API calls go through `BoardAPI` (PostgREST). The Worker uses `@supabase/supabase-js` and zod schemas for tools.
 

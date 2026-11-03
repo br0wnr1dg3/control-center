@@ -46,6 +46,7 @@ struct TaskPage: View {
 
                     descriptionEditor
                     subtasks
+                    dependencies
                     links
                     Divider()
                     timeline
@@ -126,6 +127,24 @@ struct TaskPage: View {
             store.update(task, ["description": value]) { $0.description = value }
         }
         .id(task.id)
+    }
+
+    @ViewBuilder
+    private var dependencies: some View {
+        let blockers = store.blockers(of: task)
+        let blocked = store.blocked(by: task.id)
+        if !blockers.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                SectionHeader(title: "Blocked by")
+                ForEach(blockers) { TaskRow(task: $0, showDate: true, hideProject: task.project) }
+            }
+        }
+        if !blocked.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                SectionHeader(title: "Blocks")
+                ForEach(blocked) { TaskRow(task: $0, showDate: true, hideProject: task.project) }
+            }
+        }
     }
 
     private var subtasks: some View {

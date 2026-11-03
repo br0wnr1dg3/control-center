@@ -45,6 +45,29 @@ function todayISO(timeZone: string) {
 
 const withKey = <T extends { id: number }>(t: T) => ({ key: `CC-${t.id}`, ...t });
 
+const linkedTasks = (rows: unknown[] | null) =>
+  ((rows ?? []) as unknown as { task: { id: number; title: string; kind: string; status: string } }[]).map((r) => withKey(r.task));
+
+const blockedBy = z.array(taskId).optional();
+
+// Make a task's blockers exactly this list. New ones go in before old ones come out: the triggers settle
+// the task after each step, and removing first could briefly leave only finished blockers and start it.
+// Returns an error message, if any. The triggers own what this does to the task's status.
+async function setBlockers(db: SupabaseClient, id: number, blockers: number[]): Promise<string | null> {
+  const wanted = [...new Set(blockers)];
+  if (wanted.includes(id)) return `CC-${id} can't be blocked by itself.`;
+  if (wanted.length) {
+    const { error } = await db
+      .from("task_dependencies")
+      .upsert(wanted.map((blocked_by_id) => ({ task_id: id, blocked_by_id })), { ignoreDuplicates: true });
+    if (error) return error.code === "23503" ? `One of ${wanted.map((b) => `CC-${b}`).join(", ")} doesn't exist.` : error.message;
+  }
+  let removal = db.from("task_dependencies").delete().eq("task_id", id);
+  if (wanted.length) removal = removal.not("blocked_by_id", "in", `(${wanted.join(",")})`);
+  const { error } = await removal;
+  return error?.message ?? null;
+}
+
 // Team by key or (case-insensitive) name.
 async function resolveTeam(db: SupabaseClient, ref: string): Promise<number> {
   const { data } = await db.from("teams").select("id,key,name");
@@ -76,6 +99,7 @@ Writing a task
 - Description (Markdown): what and why in 1-2 lines, then the context someone starting cold needs (links, file paths, names), then a "Done when" checklist (- [ ] ...). For agent tasks also list constraints and where outputs go. Keep team-wide rules in the team briefing (save_team context), not in every task.
 - kind: 'agent' only if Claude can finish it alone with a computer; posting publicly, sending messages as ${o}, calls, payments, logins and errands are 'human'. Mixed work = an agent task whose agent hands the human step back with add_human_task, or separate sub-tasks.
 - Split work longer than a session into sub-tasks (parent_id) under one parent that holds the shared brief.
+- For stages that must run in order, pass blocked_by: a task stays new until every blocker is done, then becomes ready by itself (and an agent task starts, so only set it when ${o} has approved the whole job). If a blocker is cancelled the task moves to needs_you for ${o} to decide.
 - Dates: scheduled_on = the day to do it (puts it on the calendar; agent tasks wait for it). due = a real deadline only. Use YYYY-MM-DD in ${o}'s timezone. today=true pins to today's list.
 - Status: new by default. Set ready=true only when ${o} says to go ahead: ready agent tasks are executed by the runner without further review.
 - Priority only when stated or obvious (1 urgent ... 4 low). Labels are lowercase tags for cross-cutting themes (linkedin, research), not a substitute for project.
@@ -128,10 +152,13 @@ export function buildServer(env: Env) {
         today: z.boolean().optional().describe("Put it on today's list"),
         ready: z.boolean().optional().describe("Skip 'new'; agent tasks marked ready get picked up by the runner"),
         parent_id: taskId.optional(),
+        blocked_by: blockedBy.describe(
+          "Tasks this one waits on. It stays new until they're all done, then becomes ready by itself, even without ready=true; if one is cancelled it moves to needs_you",
+        ),
         source: z.string().optional(),
       }),
     },
-    async ({ ready, team, ...fields }) => {
+    async ({ ready, team, blocked_by, ...fields }) => {
       let team_id: number | undefined;
       try {
         if (team) team_id = await resolveTeam(db, team);
@@ -140,10 +167,20 @@ export function buildServer(env: Env) {
       }
       const { data, error } = await db
         .from("tasks")
-        .insert({ ...fields, team_id, status: ready ? "ready" : "new" })
+        // Blocked work waits: starting as ready would let the runner begin it straight away.
+        .insert({ ...fields, team_id, status: ready && !blocked_by?.length ? "ready" : "new" })
         .select()
         .single();
-      return error ? fail(error.message) : ok(withKey(data));
+      if (error) return fail(error.message);
+      if (!blocked_by?.length) return ok(withKey(data));
+      const problem = await setBlockers(db, data.id, blocked_by);
+      if (problem) {
+        await db.from("tasks").delete().eq("id", data.id); // don't leave a half-made task to be retried beside
+        return fail(problem);
+      }
+      // Re-read: the blockers may already be finished, which settles the status.
+      const { data: settled } = await db.from("tasks").select("*").eq("id", data.id).single();
+      return ok({ ...withKey(settled), blocked_by: [...new Set(blocked_by)] });
     },
   );
 
@@ -229,14 +266,16 @@ export function buildServer(env: Env) {
   server.registerTool(
     "get_task",
     {
-      description: "Get one task with sub-tasks, comments and activity.",
+      description: "Get one task with sub-tasks, blockers (blocked_by), what it blocks, comments and activity.",
       inputSchema: z.object({ id: taskId }),
       annotations: { readOnlyHint: true },
     },
     async ({ id }) => {
-      const [task, children, comments, events] = await Promise.all([
+      const [task, children, blockers, blocking, comments, events] = await Promise.all([
         db.from("tasks").select("*,team:teams(key,name)").eq("id", id).single(),
         db.from("tasks").select("id,title,kind,status").eq("parent_id", id).order("id"),
+        db.from("task_dependencies").select("task:tasks!blocked_by_id(id,title,kind,status)").eq("task_id", id).order("blocked_by_id"),
+        db.from("task_dependencies").select("task:tasks!task_id(id,title,kind,status)").eq("blocked_by_id", id).order("task_id"),
         db.from("task_comments").select("author,body,attachments,created_at").eq("task_id", id).order("created_at"),
         db.from("task_events").select("kind,body,actor,created_at").eq("task_id", id).order("created_at"),
       ]);
@@ -253,6 +292,8 @@ export function buildServer(env: Env) {
       return ok({
         ...withKey(task.data),
         subtasks: (children.data ?? []).map(withKey),
+        blocked_by: linkedTasks(blockers.data),
+        blocks: linkedTasks(blocking.data),
         comments: withImages,
         activity: events.data ?? [],
       });
@@ -286,13 +327,16 @@ export function buildServer(env: Env) {
         due: z.string().date().nullable().optional(),
         today: z.boolean().optional(),
         parent_id: taskId.nullable().optional(),
+        blocked_by: blockedBy.describe(
+          "Replaces the tasks this one waits on ([] clears them). A task still new advances when they're all done; other statuses are left alone",
+        ),
         sort_order: z.number().optional(),
         session_id: z.string().optional(),
         log: z.string().optional().describe("Progress note for the activity log"),
         actor: z.string().optional(),
       }),
     },
-    async ({ id, log, actor, add_labels, remove_labels, add_links, team, ...fields }) => {
+    async ({ id, log, actor, add_labels, remove_labels, add_links, team, blocked_by, ...fields }) => {
       if (team !== undefined) {
         try {
           (fields as Record<string, unknown>).team_id = team === null ? null : await resolveTeam(db, team);
@@ -310,6 +354,11 @@ export function buildServer(env: Env) {
         }
         if (add_links) (fields as Record<string, unknown>).links = [...cur.data.links, ...add_links];
       }
+      // First, so a rejected cycle leaves the rest of the update unapplied.
+      if (blocked_by) {
+        const problem = await setBlockers(db, id, blocked_by);
+        if (problem) return fail(problem);
+      }
       if (Object.keys(fields).length) {
         const { error } = await db.from("tasks").update(fields).eq("id", id);
         if (error) return fail(error.message);
@@ -317,7 +366,7 @@ export function buildServer(env: Env) {
       if (log) await logEvent(db, id, "agent_log", log, actor ?? "claude");
       if (fields.status) await logEvent(db, id, "status", fields.status, actor ?? "claude");
       const { data } = await db.from("tasks").select("*").eq("id", id).single();
-      return ok(withKey(data));
+      return ok(blocked_by ? { ...withKey(data), blocked_by: [...new Set(blocked_by)] } : withKey(data));
     },
   );
 

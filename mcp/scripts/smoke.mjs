@@ -186,4 +186,89 @@ console.log(`✓ get_task: ${full.comments.length} comments, ${full.activity.len
 await call("mark_inbox_read", { task_id: t.id });
 // replace=true would un-pin real tasks, so only exercise it locally.
 await call("plan_today", { ids: [human.id], replace: BASE.includes("localhost") });
-console.log("✓ mark_inbox_read, plan_today\n\nAll checks passed.");
+console.log("✓ mark_inbox_read, plan_today");
+
+// Stage dependencies. Human stages, so a run against production can't start a real agent session.
+const stage = (title, extra = {}) => call("add_task", { title, kind: "human", source: "smoke", ...extra });
+const statusOf = async (id) => (await call("get_task", { id })).status;
+const first = await stage("Stage 1");
+const second = await stage("Stage 1b");
+const blocked = await stage("Stage 2", { blocked_by: [first.id, `CC-${second.id}`], ready: true });
+assert(blocked.status === "new" && blocked.blocked_by.length === 2, "blocked_by holds a task back, even with ready");
+await call("complete_task", { id: first.id });
+assert((await statusOf(blocked.id)) === "new", "one open blocker should hold the task");
+console.log("✓ dependencies: not ready while another blocker is open");
+await call("complete_task", { id: second.id });
+const unblocked = await call("get_task", { id: blocked.id });
+assert(unblocked.status === "ready" && unblocked.blocked_by.map((b) => b.id).join() === `${first.id},${second.id}`, "all done → ready");
+assert((await call("get_task", { id: first.id })).blocks[0].key === blocked.key, "get_task shows what it blocks");
+inbox = await call("list_inbox", {});
+assert(inbox.some((n) => n.kind === "handoff" && n.task.id === blocked.id), "human stage lands in the inbox");
+console.log("✓ dependencies: all blockers done → ready, shown both ways, human stage in inbox");
+
+const afterwards = await stage("Added after its blocker finished", { blocked_by: [first.id] });
+assert(afterwards.status === "ready", "already-finished blockers settle at once");
+const cycleA = await stage("Cycle A");
+const cycleB = await stage("Cycle B", { blocked_by: [cycleA.id] });
+const cycleC = await stage("Cycle C", { blocked_by: [cycleB.id] });
+const cycle = await callRaw("update_task", { id: cycleA.id, blocked_by: [cycleC.id], title: "Should not change" });
+assert(cycle.isError && /cycle/.test(cycle.content[0].text), "cycle rejected");
+assert((await call("get_task", { id: cycleA.id })).title === "Cycle A", "a rejected cycle changes nothing");
+const self = await callRaw("update_task", { id: cycleA.id, blocked_by: [cycleA.id] });
+assert(self.isError && /itself/.test(self.content[0].text), "self-reference rejected");
+const missing = await callRaw("add_task", { title: "Blocked by nothing", source: "smoke", blocked_by: [999999999] });
+assert(missing.isError && /exist/.test(missing.content[0].text), "unknown blocker rejected");
+assert(!(await call("list_tasks", { view: "new", query: "Blocked by nothing" })).length, "failed add leaves no task behind");
+console.log("✓ dependencies: cycles, self-references and unknown blockers rejected");
+
+await call("update_task", { id: cycleC.id, status: "ready" }); // set on purpose: must not be overridden
+await call("update_task", { id: cycleA.id, status: "cancelled" });
+const stopped = await call("get_task", { id: cycleB.id });
+assert(stopped.status === "needs_you" && /cancelled/.test(stopped.question), "cancelled blocker → needs_you with a note");
+assert((await call("list_inbox", {})).some((n) => n.kind === "question" && n.task.id === cycleB.id), "cancelled blocker lands in the inbox");
+await call("complete_task", { id: cycleB.id });
+assert((await statusOf(cycleC.id)) === "ready", "a status set by hand stays");
+const held = await stage("Scheduled stage", { blocked_by: [cycleB.id], scheduled_on: later, kind: "agent" });
+assert(held.status === "ready" && !(await call("list_tasks", { view: "agent_ready" })).some((x) => x.id === held.id), "scheduled_on still applies");
+await call("update_task", { id: held.id, status: "cancelled" });
+console.log("✓ dependencies: cancelled blocker → needs_you, hand-set status kept, scheduled_on respected");
+
+// Reviews that complete their task. Needs the upload token, and leaves a file in the bucket, so opt in.
+const uploadToken = process.env.CC_UPLOAD_TOKEN;
+if (uploadToken) {
+  const publish = async (task, query) => {
+    const res = await fetch(`${BASE}/api/publish?task=${task}&filename=smoke.txt&title=Smoke${query}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${uploadToken}`, "content-type": "text/plain" },
+      body: "smoke test",
+    });
+    const body = await res.text();
+    assert(res.ok, `publish failed: ${res.status} ${body}`);
+    return JSON.parse(body).url.split("/").pop();
+  };
+  const decide = async (token, decision) => {
+    const res = await fetch(`${BASE}/r/${token}/decision`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Smoke", decision }),
+    });
+    if (!res.ok) throw new Error(`decision failed: ${res.status} ${await res.text()}`);
+  };
+  const reviewed = await stage("Reviewed stage", { ready: true });
+  const next = await stage("Next stage", { blocked_by: [reviewed.id] });
+  const plain = await publish(reviewed.id, "");
+  await decide(plain, "approve");
+  assert((await statusOf(reviewed.id)) === "ready", "a plain approval doesn't finish the task");
+  const completing = await publish(reviewed.id, "&completes_task=1");
+  assert((await (await fetch(`${BASE}/r/${completing}/data`)).json()).review.completes_task, "review data shows completes_task");
+  await decide(completing, "changes");
+  assert((await statusOf(reviewed.id)) === "ready", "requesting changes doesn't finish the task");
+  assert((await statusOf(next.id)) === "new", "next stage waits");
+  await decide(completing, "approve");
+  const closed = await call("get_task", { id: reviewed.id });
+  assert(closed.status === "done" && /completes/.test(closed.comments.at(-1).body), "approval marks the task done and says so");
+  assert((await statusOf(next.id)) === "ready", "approval starts the next stage");
+  console.log("✓ reviews: completes_task approval → done → next stage ready; changes and plain approvals don't");
+}
+
+console.log("\nAll checks passed.");

@@ -107,11 +107,12 @@ struct BoardTask: Codable, Identifiable, Equatable {
     var sessionId: String?
     var worktree: String?  // agent's git worktree, until the runner removes it
     var repo: String?      // repo the agent session starts in; empty = runner decides
+    var blockers: [Blocker]?  // tasks this one waits on (task_dependencies); only fetchTasks embeds them
     var completedAt: String?
     var updatedAt: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, title, description, kind, status, priority, project, labels, links, due, today, source, question, worktree, repo
+        case id, title, description, kind, status, priority, project, labels, links, due, today, source, question, worktree, repo, blockers
         case teamId = "team_id"
         case scheduledOn = "scheduled_on"
         case sortOrder = "sort_order"
@@ -120,6 +121,14 @@ struct BoardTask: Codable, Identifiable, Equatable {
         case questionOptions = "question_options"
         case completedAt = "completed_at"
         case updatedAt = "updated_at"
+    }
+
+    struct Blocker: Codable, Equatable {
+        let id: Int
+
+        enum CodingKeys: String, CodingKey {
+            case id = "blocked_by_id"
+        }
     }
 
     var key: String { "CC-\(id)" }
