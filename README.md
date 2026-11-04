@@ -191,6 +191,52 @@ The payload is a snapshot from when the event happened. `task.created` for a job
 
 MCP tools: `add_webhook`, `list_webhooks`, `test_webhook`, `pause_webhook`, `resume_webhook`, `delete_webhook`.
 
+## Linear (`runner/linear.mjs`)
+
+Delegate a Linear issue to the Control Center app and an agent starts on it; what the agent does goes back to the issue, so nobody copies updates across. The runner checks Linear every `CC_LINEAR_MINUTES` (3).
+
+**Coming in.** A delegated, open issue in a mapped Linear team becomes one ready agent task, with `external_ref` `{source: "linear", id: "ENG-123", url, linear_id}` and the issue's creator as `requested_by`. Its project comes along unless another team already has a project of that name. The repo is left empty for the runner to match or the agent to ask. Edits to the title, description, priority or due date reach the task, though a session already running keeps the brief it started with.
+
+| On the board | On the Linear issue |
+| --- | --- |
+| Task starts | First `started` status, if it was in backlog or todo. Triage is left to a person |
+| Agent's `add_comment`, `update_task` log | Comment |
+| `needs_you` (still in the inbox too) | Comment, "Waiting on <owner>" |
+| PR link added with `add_links` | Comment, and the review status: the team's setting, else a `started` status with "review" in its name. Never backwards |
+| Done | Comment with the summary, delegate removed. The status only moves if the team has a Done status set |
+| Handed back to the owner, or cancelled | Comment, delegate removed |
+
+Comments from the owner and reviewers, and the runner's own notes, stay on the board. Updates wait in `linear_outbox` (written by triggers, so any client's changes count), go out in order per task, and are retried for as long as Linear is unreachable; the inbox hears after a few failures.
+
+- **Delegating again** reopens the same task. Removing the delegate when work finishes is what makes that detectable, since an issue left delegated would look the same as one delegated a second time.
+- **Taken back** (delegate removed, or the issue closed): a task that hasn't started is cancelled; a running session carries on and the inbox is told once.
+- **Assigned issues** (optional, off by default): set a team's "Also show issues assigned to" to an email and that person's open, undelegated issues appear as human tasks on Today. They report nothing back. Ticking one off doesn't touch Linear; one that closes or moves to someone else in Linear is cancelled here.
+
+**Not yet:** replies written on the Linear issue aren't read, so questions are answered on the board. Webhooks for instant pickup and Linear's agent session panel are phase 2.
+
+**Delegating approves work.** A ready agent task starts without further review in a session that runs with permissions skipped, so anyone who can delegate in a mapped Linear team can start one. Map only teams whose members you trust that far. The agent's prompt says the issue's words aren't the owner's instructions beyond the work itself; that's a guardrail, not a sandbox. Everything the agent posts is visible to whoever reads the issue, and its prompt tells it so, but nothing filters what it writes.
+
+### Setting it up
+
+Workspace admin, in Linear:
+
+1. **Settings → API → OAuth applications → New.** Name it `Control Center` (this is the name people delegate to) and give it an icon. Any callback URL will do; client credentials don't use it.
+2. **Turn on client credentials tokens.** The sync asks for the scopes `read,write,app:assignable`: `app:assignable` is what lets issues be delegated to it. Leave out `app:mentionable`, since nothing reads mentions yet.
+3. **Leave webhooks and "Agent session events" off** for now. Turning that category on shows Linear's session panel, which marks an agent unresponsive if it doesn't answer within 10 seconds; polling can't, so that waits for phase 2.
+4. **Check team access** on the app's page. It covers all public teams by default; private teams need adding.
+5. **Install it as an app** by opening this once and approving (you can ignore where it redirects to; the sync only uses client credentials), so it's in the delegate menu: `https://linear.app/oauth/authorize?client_id=<id>&redirect_uri=<callback>&response_type=code&scope=read,write,app:assignable&actor=app`
+
+On each runner machine that should sync (no restart needed):
+
+```bash
+security add-generic-password -a control-center -s "control-center linear client id" -w
+security add-generic-password -a control-center -s "control-center linear client secret" -w
+```
+
+Then in the app, under each company's team settings → **Linear**, enter the Linear team keys that belong to it. That's what turns the sync on. Optionally set its review and done statuses.
+
+To test locally: `CC_SUPABASE_URL=http://127.0.0.1:57721 CC_SERVICE_KEY=<demo key> node --test runner/linear.test.mjs` runs the whole flow against the local database and a fake Linear.
+
 ## Reviews (`mcp/src/review.ts`, `runner/bin/cc-publish`)
 
 Agents share outputs as links, not file paths: `cc-publish <file> --title "Cut v2 · 9:16"` uploads to R2 (bucket `control-center-media`, Bearer `UPLOAD_TOKEN`), attaches the link to the task and prints it. Each file gets a private `/r/<token>` page: videos get a frame-accurate player (frame stepping, timeline markers) where Chris and the team leave notes on exact frames (with a still of each), then **Approve** or **Request changes**; images, PDFs and HTML pages open inline (HTML sandboxed). Notes are stored quietly; the decision is posted to the task as one `reviewer` comment listing every note with its timecode, lands in the inbox, and the runner types it into the waiting agent session, which makes the next version or wraps up.
@@ -208,6 +254,7 @@ Polls every 20s. Only tasks with `kind = agent` **and** `status = ready` are sta
 - **Closing:** when a task is done, the runner types a cleanup request into its session (stop dev servers, remove the worktree if nothing would be lost), then closes the window once `CC_CLOSE_AFTER_MINUTES` (60) have passed and its screen has been still for that long, so a window someone is working in stays open; cancelled closes at once, without cleanup. As a backstop, and for PRs merged after the window closed, every `CC_CLEANUP_MINUTES` (10) the runner removes worktrees of finished tasks, but only when clean and either adding no commits or with a merged PR and nothing unpushed: `git worktree remove`, `git branch -d` (never `-D`), `git worktree prune`, one step at a time. Otherwise it keeps the worktree and logs why on the task.
 - **Session hooks** (`runner/hooks/session-state.mjs`, passed with `--settings`): when a session stops or sits waiting for input, an in-progress task moves to `needs_you` with the agent's last message, so it reaches the inbox however the agent asked; typing into the session moves it back to `in_progress`.
 - At most 2 tasks run at once.
+- **Linear:** picks up delegated issues and reports back on them; see [Linear](#linear-runnerlinearmjs).
 - **Self-update:** every `CC_UPDATE_MINUTES` (10) the runner fast-forwards its own checkout to `origin/main`, so a push to `main` reaches every runner machine. It only does so on a clean `main` with nothing unpushed; otherwise it logs why once and leaves the checkout alone. Hook changes apply at once; if `runner/*.mjs` changed, it exits and launchd restarts it on the new code (running sessions are unaffected).
 
 ```bash
@@ -218,7 +265,7 @@ runner/install.sh uninstall
 
 New machine: `node runner/clone-repos.mjs` clones every repo on the board into the same folders (the runner's published inventory, minus hidden ones), so agents find the same paths everywhere. `CC_MAX_CONCURRENT=<n>` on `install.sh` sets how many agents run at once.
 
-Requires: cmux, `claude` signed in to the control-center MCP (`/mcp`), service key in Keychain (`control-center service key`). Env overrides: `CC_MAX_CONCURRENT`, `CC_POLL_SECONDS`, `CC_CLOSE_AFTER_MINUTES`, `CC_CLEANUP_MINUTES`, `CC_REPO_SYNC_MINUTES`, `CC_UPDATE_MINUTES`. Needs `git` and `gh` (signed in) for worktree cleanup.
+Requires: cmux, `claude` signed in to the control-center MCP (`/mcp`), service key in Keychain (`control-center service key`). Env overrides: `CC_MAX_CONCURRENT`, `CC_POLL_SECONDS`, `CC_CLOSE_AFTER_MINUTES`, `CC_CLEANUP_MINUTES`, `CC_REPO_SYNC_MINUTES`, `CC_UPDATE_MINUTES`, `CC_LINEAR_MINUTES`. Needs `git` and `gh` (signed in) for worktree cleanup.
 
 ## Mac app (`mac/`)
 

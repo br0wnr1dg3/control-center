@@ -111,6 +111,10 @@ struct TeamSettingsView: View {
     @State private var workdir = ""
     @State private var github = ""
     @State private var baseBranch = ""
+    @State private var linearTeams = ""
+    @State private var linearReviewState = ""
+    @State private var linearDoneState = ""
+    @State private var linearAssignee = ""
     @State private var newProject = ""
 
     private var projects: [ProjectSpec] { store.projectSpecs.filter { $0.teamId == team.id } }
@@ -153,6 +157,7 @@ struct TeamSettingsView: View {
                         }
                 }
                 foundRepos
+                linearSection
                 group("Working folder", note: "Where this team's files live on this Mac.") {
                     HStack {
                         TextField("~/Developer/projects/…", text: $workdir)
@@ -184,6 +189,50 @@ struct TeamSettingsView: View {
         workdir = team.workdir ?? ""
         github = team.github ?? ""
         baseBranch = team.baseBranch ?? ""
+        linearTeams = (team.linearTeams ?? []).joined(separator: ", ")
+        linearReviewState = team.linearReviewState ?? ""
+        linearDoneState = team.linearDoneState ?? ""
+        linearAssignee = team.linearAssignee ?? ""
+    }
+
+    private var linearSection: some View {
+        group("Linear", note: "Issues from these Linear teams that are delegated to Control Center become ready agent tasks here, and an agent starts on them without further review. Their progress goes back to the issue. Needs the Linear app set up on the runner (see README).") {
+            VStack(alignment: .leading, spacing: 8) {
+                linearField("Linear teams", "Team keys, e.g. ENG, OPS", $linearTeams, saveLinearTeams)
+                linearField("Review status", "A started status with “review” in its name", $linearReviewState) {
+                    saveLinear("linear_review_state", linearReviewState) { $0.linearReviewState = $1 }
+                }
+                linearField("Done status", "Never mark issues done", $linearDoneState) {
+                    saveLinear("linear_done_state", linearDoneState) { $0.linearDoneState = $1 }
+                }
+                linearField("Also show issues assigned to", "Off, or an email: read-only tasks on Today", $linearAssignee) {
+                    saveLinear("linear_assignee", linearAssignee) { $0.linearAssignee = $1 }
+                }
+            }
+        }
+    }
+
+    private func linearField(_ label: String, _ placeholder: String, _ text: Binding<String>, _ save: @escaping () -> Void) -> some View {
+        HStack {
+            Text(label).frame(width: 190, alignment: .leading)
+            TextField(placeholder, text: text)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(save)
+        }
+    }
+
+    private func saveLinearTeams() {
+        let keys = linearTeams
+            .split(whereSeparator: { $0 == "," || $0.isWhitespace })
+            .map { $0.uppercased() }
+        linearTeams = keys.joined(separator: ", ")
+        guard keys != (team.linearTeams ?? []) else { return }
+        store.updateTeam(team, ["linear_teams": keys]) { $0.linearTeams = keys }
+    }
+
+    private func saveLinear(_ column: String, _ text: String, _ apply: @escaping (inout Team, String?) -> Void) {
+        let value = text.trimmingCharacters(in: .whitespaces)
+        store.updateTeam(team, [column: value.isEmpty ? NSNull() : value]) { apply(&$0, value.isEmpty ? nil : value) }
     }
 
     private var header: some View {

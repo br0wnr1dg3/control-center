@@ -19,10 +19,18 @@ struct Team: Codable, Identifiable, Equatable, Hashable {
     var github: String?
     var baseBranch: String?  // default branch agent work starts from; per-repo settings override it
     var sortOrder: Double
+    var linearTeams: [String]?       // Linear team keys whose delegated issues come here
+    var linearReviewState: String?   // status for an open PR; nil finds one with "review" in its name
+    var linearDoneState: String?     // status for finished work; nil never marks it done
+    var linearAssignee: String?      // email: also show this person's issues, read-only; nil is off
 
     enum CodingKeys: String, CodingKey {
         case id, key, name, kind, color, context, repos, workdir, github
         case baseBranch = "base_branch"
+        case linearTeams = "linear_teams"
+        case linearReviewState = "linear_review_state"
+        case linearDoneState = "linear_done_state"
+        case linearAssignee = "linear_assignee"
         case sortOrder = "sort_order"
     }
 
