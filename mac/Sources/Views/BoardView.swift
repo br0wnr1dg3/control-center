@@ -10,6 +10,7 @@ struct BoardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            BoardFilterBar(project: project, shown: columns.reduce(0) { $0 + store.column($1, project: project).count })
             HStack(alignment: .top, spacing: 10) {
                 ForEach(columns, id: \.self) { column($0) }
             }
@@ -65,11 +66,16 @@ struct BoardCard: View {
             }
             if !task.labels.isEmpty || task.project != nil || task.calendarDay != nil {
                 HStack(spacing: 6) {
-                    if let project = task.project { ProjectTag(project: project) }
-                    ForEach(task.labels.prefix(2), id: \.self) { LabelChip(label: $0) }
+                    // Tags don't shrink, so drop labels until the row fits rather than spill into the next column.
+                    ViewThatFits(in: .horizontal) {
+                        ForEach((0...min(task.labels.count, 2)).reversed(), id: \.self) { n in tags(labels: n) }
+                        Color.clear.frame(width: 0, height: 0)
+                    }
                     Spacer(minLength: 0)
                     if let day = task.calendarDay {
-                        Text(Day.title(day)).font(.caption).foregroundStyle(task.isOverdue ? .red : .secondary)
+                        // Fixed size so labels can't squeeze the date into a column of single letters.
+                        Text(Day.shortTitle(day)).font(.caption).foregroundStyle(task.isOverdue ? .red : .secondary)
+                            .lineLimit(1).fixedSize()
                     }
                 }
             }
@@ -85,5 +91,12 @@ struct BoardCard: View {
             Text(task.title).padding(8).background(.background, in: RoundedRectangle(cornerRadius: 6))
         }
         .contextMenu { TaskMenu(task: task) }
+    }
+
+    private func tags(labels n: Int) -> some View {
+        HStack(spacing: 6) {
+            if let project = task.project { ProjectTag(project: project) }
+            ForEach(task.labels.prefix(n), id: \.self) { LabelChip(label: $0) }
+        }
     }
 }

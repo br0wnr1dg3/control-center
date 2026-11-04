@@ -30,6 +30,8 @@ final class BoardStore {
     var teamFilter: Int? = UserDefaults.standard.object(forKey: "teamFilter") as? Int {
         didSet { UserDefaults.standard.set(teamFilter, forKey: "teamFilter") }
     }
+    /// Board search and filters. Kept here so they survive opening a task and coming back.
+    var boardFilter = BoardFilter()
     /// The open New task composer, if any.
     var composer: TaskDraft?
     var selectedTaskId: Int? { didSet { if selectedTaskId != oldValue { Task { await loadDetail() } } } }
@@ -98,7 +100,8 @@ final class BoardStore {
         let list = status == .done
             ? tasks.filter { $0.status == .done }.sorted { ($0.completedAt ?? "") > ($1.completedAt ?? "") }
             : sorted(tasks.filter { $0.status == status })
-        return project.map { p in list.filter { $0.project == p } } ?? list
+        let filtered = boardFilter.isActive ? list.filter(boardFilter.matches) : list
+        return project.map { p in filtered.filter { $0.project == p } } ?? filtered
     }
 
     func subtasks(of id: Int) -> [BoardTask] { allTasks.filter { $0.parentId == id } }
@@ -117,6 +120,7 @@ final class BoardStore {
         default: break
         }
         if let id = env["CC_SELECT"].flatMap(Int.init) { selectedTaskId = id }
+        if let query = env["CC_SEARCH"] { boardFilter.query = query }
         if env["CC_COMPOSE"] != nil { composer = defaults(TaskDraft(kind: .agent, scheduledOn: Day.adding(3, to: Day.today))) }
         Task { await refresh() }
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { _ in
