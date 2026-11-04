@@ -25,8 +25,10 @@ const CONFIG = {
   pollSeconds: Number(process.env.CC_POLL_SECONDS ?? 20),
   home: process.env.CC_HOME ?? join(homedir(), "Developer", "ControlCenter"),
   cmux: process.env.CC_CMUX ?? "/Applications/cmux.app/Contents/Resources/bin/cmux",
-  // Minutes a finished session's window stays open to clean up and so you can read the end of it.
-  closeAfterMinutes: Number(process.env.CC_CLOSE_AFTER_MINUTES ?? 5),
+  // Minutes a finished session's window stays open to clean up and so you can read the end of it,
+  // and how long its screen must have been still before it's closed. Longer than a CI run: a session
+  // waiting on a background command shows no spinner, so its screen looks idle.
+  closeAfterMinutes: Number(process.env.CC_CLOSE_AFTER_MINUTES ?? 60),
   cleanupEveryMinutes: Number(process.env.CC_CLEANUP_MINUTES ?? 10),
   repoSyncMinutes: Number(process.env.CC_REPO_SYNC_MINUTES ?? 10),
   updateMinutes: Number(process.env.CC_UPDATE_MINUTES ?? 10),
@@ -346,7 +348,7 @@ How to work:
 - If you've done your part but the rest of this task is ${OWNER}'s (decisions, posting, steps they have to do), hand it back instead of completing it: update_task(id=${id}, kind="human", status="ready", log="<what you did; what's left for ${OWNER}>"). For a separate human step on a task you are finishing, use add_human_task. Never set status "new".
 - Share outputs as links, not file paths: \`cc-publish <file> --title "<what it is, e.g. Cut v2 · 9:16>"\` uploads it, attaches it to this task and prints a link. Videos get a review page where ${OWNER} and the team comment on exact frames; HTML pages and PDFs fill the window; images open inline. Publish written work (posts, scripts, concepts, briefs) as a .md file: it reads as a document and reviewers comment on the exact passage.
 - When a video or other output needs sign-off (a cut, a design, a page, a draft), publish it, say what changed and give the link, then stop and wait. ${OWNER} or the team review it and their decision arrives here as "Review from <name>: Approved ..." or "Changes requested ..." with notes, each tied to a timecode (with a still of the frame you can open) or to a quoted passage. For changes, make the next version, publish it with the next version number, and wait again. Once approved, finish up. If approval is all that's left of this task (nothing to do afterwards, or the description asks for it), publish with --completes-task: approving then marks the task done for you and frees any stage waiting on it.
-- When finished, call complete_task(id=${id}, summary=...) with what you did and where outputs are. The runner then asks you to clean up (stop what you started, remove the worktree if it's safe) and closes this window a few minutes later; the session can be resumed from the board if needed.
+- When finished, call complete_task(id=${id}, summary=...) with what you did and where outputs are. The runner then asks you to clean up (stop what you started, remove the worktree if it's safe) and closes this window once it has been idle for a while; the session can be resumed from the board if needed.
 - Only work on this task.`,
   ];
   return lines.filter(Boolean).join("\n");
@@ -451,7 +453,7 @@ export function cleanupPrompt(task) {
     ? `the worktree ${task.worktree}`
     : "any git worktree you made for this task (if you made none, skip the git steps)";
   const main = repo ?? "<main checkout, the first entry of git worktree list>";
-  return `Clean up: CC-${task.id} is done and the runner closes this window in a few minutes. Don't start new work or change the task. Stop any dev servers and background processes you started. Then tidy ${target}, one command at a time, never chained. First check it has no uncommitted changes, no unpushed commits, and that its PR is merged or its branch adds nothing. If any of those fail, leave it alone and say why in one line, without asking a question: the runner removes it later, once it's safe. Otherwise run git -C ${main} worktree remove <path>, then git -C ${main} branch -d <branch> (never -D or --force; if git refuses, keep the branch and say so), then git -C ${main} worktree prune. End with one line saying what you cleaned up.`;
+  return `Clean up: CC-${task.id} is done and the runner closes this window once it has been idle for a while. Don't start new work or change the task. Stop any dev servers and background processes you started. Then tidy ${target}, one command at a time, never chained. First check it has no uncommitted changes, no unpushed commits, and that its PR is merged or its branch adds nothing. If any of those fail, leave it alone and say why in one line, without asking a question: the runner removes it later, once it's safe. Otherwise run git -C ${main} worktree remove <path>, then git -C ${main} branch -d <branch> (never -D or --force; if git refuses, keep the branch and say so), then git -C ${main} worktree prune. End with one line saying what you cleaned up.`;
 }
 
 // When this round of done was handed to the session for cleanup. An ask from before the task was
@@ -490,6 +492,25 @@ export async function closeFinished(workspaces, activeIds) {
 // Failures already logged, so a stuck window logs once rather than every poll.
 const closeFailures = new Set();
 
+// What each open window last showed and since when. A working session's spinner redraws every second
+// and typing changes the prompt, so a still screen is what tells us nobody is using the window. It
+// reads the terminal rather than relying on session hooks because anything can be running in there:
+// someone may have started their own claude in a finished task's window.
+const screens = new Map();
+
+async function quietMinutes(workspace) {
+  let text;
+  try {
+    text = await cmux("read-screen", "--workspace", workspace);
+  } catch {
+    return Infinity; // can't be read, so there's nothing in it to protect
+  }
+  const seen = screens.get(workspace);
+  if (seen?.text === text) return minutesSince(seen.since);
+  screens.set(workspace, { text, since: new Date().toISOString() });
+  return 0;
+}
+
 async function closeOne(task, workspace) {
   let since = task.completed_at ?? task.updated_at;
   if (task.status === "done") {
@@ -516,8 +537,14 @@ async function closeOne(task, workspace) {
     }
     since = asked;
   }
-  if (task.status !== "cancelled" && minutesSince(since) < CONFIG.closeAfterMinutes) return;
-  await cmux("close-workspace", "--workspace", workspace);
+  if (task.status !== "cancelled") {
+    // Sampled every poll, even during the grace period, so the two waits overlap rather than add up.
+    const quiet = await quietMinutes(workspace);
+    if (minutesSince(since) < CONFIG.closeAfterMinutes || quiet < CONFIG.closeAfterMinutes) return;
+  }
+  // --force because cmux refuses to close a window with a running process, which an idle claude is.
+  await cmux("close-workspace", "--workspace", workspace, "--force");
+  screens.delete(workspace);
   await addEvent(task.id, "status", "runner closed the session window");
   log(`closed CC-${task.id} (${task.status})`);
 }

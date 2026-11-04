@@ -42,6 +42,7 @@ Production is deployed from this machine, not from GitHub, and the runner execut
 ## Gotchas we've hit
 
 - cmux must be in socket **Password** mode or launchd can't open workspaces ("Failed to write to socket").
+- cmux refuses `close-workspace` while a process is running, and an idle `claude` counts, so the runner passes `--force` and first waits for the screen to go still.
 - Claude's folder-trust prompt swallows the first prompt: task folders live under `~/Developer`, which is trusted once.
 - `claude --allowedTools` is variadic and eats a following positional prompt; the prompt goes first in `run.sh`.
 - Session hooks read the hook script from this checkout each time, so hook edits apply to running sessions immediately; prompt and settings changes only apply to new sessions.
