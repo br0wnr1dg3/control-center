@@ -32,6 +32,9 @@ final class BoardStore {
     }
     /// Board search and filters. Kept here so they survive opening a task and coming back.
     var boardFilter = BoardFilter()
+    var boardSort = BoardSort(rawValue: UserDefaults.standard.string(forKey: "boardSort") ?? "") ?? .priority {
+        didSet { UserDefaults.standard.set(boardSort.rawValue, forKey: "boardSort") }
+    }
     /// The open New task composer, if any.
     var composer: TaskDraft?
     var selectedTaskId: Int? { didSet { if selectedTaskId != oldValue { Task { await loadDetail() } } } }
@@ -100,7 +103,8 @@ final class BoardStore {
         let list = status == .done
             ? tasks.filter { $0.status == .done }.sorted { ($0.completedAt ?? "") > ($1.completedAt ?? "") }
             : sorted(tasks.filter { $0.status == status })
-        let filtered = boardFilter.isActive ? list.filter(boardFilter.matches) : list
+        let sortedList = boardSort.sort(list) ?? list
+        let filtered = boardFilter.isActive ? sortedList.filter(boardFilter.matches) : sortedList
         return project.map { p in filtered.filter { $0.project == p } } ?? filtered
     }
 

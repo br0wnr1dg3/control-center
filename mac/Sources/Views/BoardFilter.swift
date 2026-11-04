@@ -62,6 +62,54 @@ struct BoardFilter: Equatable {
     }
 }
 
+/// How cards are ordered within each column.
+enum BoardSort: String, CaseIterable {
+    case priority, date, due, created, updated
+
+    var label: String {
+        switch self {
+        case .priority: "Priority"
+        case .date: "Date"
+        case .due: "Due date"
+        case .created: "Created"
+        case .updated: "Last updated"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .priority: "Urgent first, then manual order"
+        case .date: "Soonest scheduled or due first"
+        case .due: "Soonest deadline first"
+        case .created: "Newest first"
+        case .updated: "Most recent first"
+        }
+    }
+
+    /// nil for .priority: the board keeps its own order (and Done by completion).
+    func sort(_ list: [BoardTask]) -> [BoardTask]? {
+        // Undated tasks go last; ties fall back to priority so the order stays stable.
+        let tie: (BoardTask, BoardTask) -> Bool = { ($0.priorityLevel.rank, $0.id) < ($1.priorityLevel.rank, $1.id) }
+        func byDay(_ key: @escaping (BoardTask) -> String?) -> [BoardTask] {
+            list.sorted { a, b in
+                switch (key(a), key(b)) {
+                case let (x?, y?) where x != y: x < y
+                case (_?, nil): true
+                case (nil, _?): false
+                default: tie(a, b)
+                }
+            }
+        }
+        switch self {
+        case .priority: return nil
+        case .date: return byDay { $0.today ? min($0.calendarDay ?? Day.today, Day.today) : $0.calendarDay }
+        case .due: return byDay(\.due)
+        case .created: return list.sorted { $0.id > $1.id }
+        case .updated: return list.sorted { ($0.updatedAt ?? "", $0.id) > ($1.updatedAt ?? "", $1.id) }
+        }
+    }
+}
+
 /// The row above the board: search field, Filter menu, and a chip per active filter.
 struct BoardFilterBar: View {
     @Bindable var store = BoardStore.shared
@@ -72,7 +120,6 @@ struct BoardFilterBar: View {
     var body: some View {
         HStack(spacing: 8) {
             searchField
-            filterMenu
             if store.boardFilter.hasFilters {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) { chips }
@@ -85,6 +132,8 @@ struct BoardFilterBar: View {
                     .buttonStyle(.borderless)
                     .font(.caption)
             }
+            filterMenu
+            sortMenu
         }
         .padding(.horizontal, 12)
         .padding(.top, 10)
@@ -131,6 +180,22 @@ struct BoardFilterBar: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            Picker("Sort by", selection: $store.boardSort) {
+                ForEach(BoardSort.allCases, id: \.self) { sort in
+                    Text(sort.label).help(sort.hint).tag(sort)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Label(store.boardSort == .priority ? "Sort" : store.boardSort.label, systemImage: "arrow.up.arrow.down")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Sort cards: \(store.boardSort.hint.lowercased())")
     }
 
     // Toggle buttons keep each menu's choices independent; a ✓ marks what's on.
