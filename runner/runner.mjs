@@ -92,10 +92,34 @@ const workspaceTitle = (task) => `CC-${task.id} ${task.title}`.slice(0, 60);
 // For run.sh. Titles can come from outside apps (inbound events), and double quotes would still run $(...).
 export const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
 
+// Holds cmux open when no task has a window. No "CC-" prefix, so the runner never treats it as a task's.
+const HOME_WORKSPACE = "Runner home";
+
+// With no window left, cmux answers every call with this error, so nothing could start until someone
+// opened a window by hand. Open one instead.
+async function listWorkspaces() {
+  try {
+    return await cmux("list-workspaces");
+  } catch (err) {
+    if (!err.message.includes("TabManager not available")) throw err;
+    log("cmux has no window open; opening one");
+    await cmux("new-window", "--name", HOME_WORKSPACE);
+    return cmux("list-workspaces");
+  }
+}
+
+// Closing the last workspace takes cmux's window with it, so leave another one behind first.
+async function keepCmuxOpen(closing) {
+  const open = (await listWorkspaces()).match(/workspace:\d+/g) ?? [];
+  if (open.some((workspace) => workspace !== closing)) return;
+  await cmux("new-workspace", "--name", HOME_WORKSPACE, "--cwd", CONFIG.home);
+  log(`opened "${HOME_WORKSPACE}" to keep cmux open`);
+}
+
 // Map task id -> workspace ref, by the "CC-<id> " title prefix.
 async function taskWorkspaces() {
   const map = new Map();
-  for (const line of (await cmux("list-workspaces")).split("\n")) {
+  for (const line of (await listWorkspaces()).split("\n")) {
     const m = line.match(/(workspace:\d+)\s+CC-(\d+)\s/);
     if (m) map.set(Number(m[2]), m[1]);
   }
@@ -542,6 +566,7 @@ async function closeOne(task, workspace) {
     const quiet = await quietMinutes(workspace);
     if (minutesSince(since) < CONFIG.closeAfterMinutes || quiet < CONFIG.closeAfterMinutes) return;
   }
+  await keepCmuxOpen(workspace);
   // --force because cmux refuses to close a window with a running process, which an idle claude is.
   await cmux("close-workspace", "--workspace", workspace, "--force");
   screens.delete(workspace);
