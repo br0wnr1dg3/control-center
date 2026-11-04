@@ -3,7 +3,7 @@
 A personal task board driven by Claude. Four parts share one Supabase Postgres database; see README.md for what each does.
 
 - `supabase/migrations/`: schema and triggers. Inbox notifications, @agent hand-offs, project/team sync, hand-back and answered-question behaviour all live in triggers, so every client agrees.
-- `mcp/`: Cloudflare Worker. MCP tools (`src/tools.ts`, behind passphrase OAuth), email capture (`src/email.ts`, AgentMail + Claude Haiku triage), review links (`src/review.ts`, R2), signed inbound events from other apps (`src/inbound.ts`, applied by `apply_inbound_event` in Postgres).
+- `mcp/`: Cloudflare Worker. MCP tools (`src/tools.ts`, behind passphrase OAuth), email capture (`src/email.ts`, AgentMail + Claude Haiku triage), review links (`src/review.ts`, R2), signed inbound events from other apps (`src/inbound.ts`, applied by `apply_inbound_event` in Postgres), outbound webhooks sent on a cron from an outbox that triggers fill (`src/webhooks.ts`).
 - `runner/`: launchd agent that starts each ready agent task as an interactive `claude` session in a cmux workspace (worktree, Remote Control, session hooks), delivers comments, closes finished sessions, cleans merged worktrees and publishes the repo inventory. `hooks/session-state.mjs` keeps the board in step with the terminal; `bin/cc-publish` uploads outputs for review.
 - `mac/`: SwiftUI app (SwiftPM, no Xcode project): Inbox, Today, Upcoming, Board, task pages, team settings, menu bar, ⌃⌥Space composer.
 
@@ -18,7 +18,7 @@ Production is deployed from this machine, not from GitHub, and the runner execut
 ### Local testing
 
 - Database: `supabase start` (ports 577xx; other projects use 543xx/553xx/564xx). `supabase db reset --local` rebuilds from migrations; load the owner's teams with `docker exec -i supabase_db_control-center psql -U postgres < supabase/seed.local.sql` (psql isn't installed on the host).
-- Worker: `cd mcp && npx wrangler dev --port 8787` (reads `.dev.vars`: local Supabase URL and demo service key). Smoke test: `node scripts/smoke.mjs` (local) or `node scripts/smoke.mjs <prod url> <passphrase>`; it leaves `source=smoke` rows to delete afterwards. Team-writing checks only run locally; set `CC_UPLOAD_TOKEN` (`UPLOAD_TOKEN` in `.dev.vars`) to also check reviews that complete their task.
+- Worker: `cd mcp && npx wrangler dev --port 8787 --test-scheduled` (reads `.dev.vars`: local Supabase URL and demo service key). Crons don't fire by themselves locally; `GET /__scheduled` runs one. Smoke test: `node scripts/smoke.mjs` (local) or `node scripts/smoke.mjs <prod url> <passphrase>`; it leaves `source=smoke` rows to delete afterwards. Team-writing and webhook checks only run locally (webhooks need `--test-scheduled` and `WEBHOOK_RETRY_BASE_SECONDS=0`, and are skipped without them); set `CC_UPLOAD_TOKEN` (`UPLOAD_TOKEN` in `.dev.vars`) to also check reviews that complete their task.
 - App: `cd mac && swift build`, then `CC_SUPABASE_URL=http://127.0.0.1:57721 CC_SERVICE_KEY=<demo key> .build/debug/ControlCenterBoard`. `CC_SECTION=inbox|upcoming|board|team:<id>`, `CC_SELECT=<task id>` and `CC_COMPOSE=1` open a specific view for screenshots. Capture only the app window (`screencapture -l <window id>`), never the whole screen.
 - Runner pieces: `runner.mjs` only starts its loop when run directly, so tests can `import { workRepo, cleanupWorktree, syncRepos, ... }`. Don't run the real runner against local data with ready agent tasks in it: it opens real Claude sessions.
 
@@ -49,4 +49,6 @@ Production is deployed from this machine, not from GitHub, and the runner execut
 - AgentMail's `extracted_text` includes Gmail forwards; `email.ts` cuts the owner's own note itself before honouring `@agent`.
 - Task titles can come from outside apps (inbound events), so anything written into a shell script goes through `shellQuote`; `JSON.stringify` still expands `$(...)`.
 - PostgREST: duplicate `or=` params AND together; embedded filters use `table.column` (e.g. `local_repos.hidden`).
+- `/__scheduled` only waits for a handler that returns its promise; with `ctx.waitUntil` it answers at once, while the run is still going.
+- Webhook secrets: the `vault` schema isn't exposed through PostgREST, so they only leave Postgres through `create_webhook` (once, to a person) and `claim_webhook_deliveries` (to the sender). Both need the service key, which the app and tools also hold: that's a boundary of code, not of credentials.
 - Supabase local DB clock is UTC; day-based views use the owner's timezone, so "today" can differ in local tests.

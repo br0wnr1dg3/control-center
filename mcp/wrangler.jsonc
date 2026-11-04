@@ -19,5 +19,7 @@
   },
   // Secrets (npx wrangler secret put <NAME>): SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, OWNER_PASSPHRASE.
   // Inbound events (src/inbound.ts): INBOUND_SECRET_<TEAM KEY> for each team that accepts them.
+  // Sends outbound webhooks (src/webhooks.ts). Locally: wrangler dev --test-scheduled, then GET /__scheduled.
+  "triggers": { "crons": ["* * * * *"] },
   "observability": { "enabled": true }
 }

@@ -99,6 +99,33 @@ struct BoardAPI {
         _ = try await request("projects?id=eq.\(id)", method: "PATCH", body: fields)
     }
 
+    // ---------- Webhooks ----------
+
+    func fetchWebhooks(team: Int) async throws -> [Webhook] {
+        try await get("webhook_overview?team_id=eq.\(team)&select=*&order=id")
+    }
+
+    /// Returns the signing secret, which can't be read again after this.
+    func createWebhook(team: Int, url: String, project: Int?, events: [String], scope: String) async throws -> String {
+        let data = try await request("rpc/create_webhook", method: "POST", body: [
+            "p_team": team, "p_url": url, "p_project": project ?? NSNull(), "p_events": events, "p_scope": scope,
+        ] as [String: Any])
+        struct Created: Decodable { let secret: String }
+        return try JSONDecoder().decode(Created.self, from: data).secret
+    }
+
+    func setWebhookActive(_ id: Int, _ active: Bool) async throws {
+        _ = try await request("rpc/set_webhook_active", method: "POST", body: ["p_webhook": id, "p_active": active] as [String: Any])
+    }
+
+    func testWebhook(_ id: Int) async throws {
+        _ = try await request("rpc/test_webhook", method: "POST", body: ["p_webhook": id])
+    }
+
+    func deleteWebhook(_ id: Int) async throws {
+        _ = try await request("webhooks?id=eq.\(id)", method: "DELETE")
+    }
+
     func fetchInbox() async throws -> [InboxItem] {
         try await get("notifications?select=id,kind,body,read_at,created_at,task:tasks(id,title,status)&order=created_at.desc&limit=100")
     }
