@@ -20,6 +20,7 @@ final class BoardStore {
     private(set) var teams: [Team] = []
     private(set) var projectSpecs: [ProjectSpec] = []
     private(set) var localRepos: [LocalRepo] = []
+    private(set) var webhooks: [Webhook] = []
     private(set) var inbox: [InboxItem] = [] { didSet { updateDockBadge() } }
     private(set) var lastError: String?
     private(set) var lastRefresh: Date?
@@ -412,6 +413,35 @@ final class BoardStore {
             await refresh()
         }
     }
+
+    // MARK: Webhooks
+
+    /// Only the team settings page shows these, so it loads them itself rather than every board refresh.
+    func loadWebhooks(team: Int) async {
+        do {
+            webhooks = try await client().fetchWebhooks(team: team)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// The secret on success. It's only ever available here, so the caller has to show it.
+    func addWebhook(team: Int, url: String, project: Int?, events: [String], scope: String) async throws -> String {
+        let secret = try await client().createWebhook(team: team, url: url, project: project, events: events, scope: scope)
+        await loadWebhooks(team: team)
+        return secret
+    }
+
+    private func changeWebhook(_ hook: Webhook, _ change: @escaping (BoardAPI) async throws -> Void) {
+        Task {
+            do { try await change(client()) } catch { lastError = error.localizedDescription }
+            await loadWebhooks(team: hook.teamId)
+        }
+    }
+
+    func setWebhookActive(_ hook: Webhook, _ active: Bool) { changeWebhook(hook) { try await $0.setWebhookActive(hook.id, active) } }
+    func testWebhook(_ hook: Webhook) { changeWebhook(hook) { try await $0.testWebhook(hook.id) } }
+    func deleteWebhook(_ hook: Webhook) { changeWebhook(hook) { try await $0.deleteWebhook(hook.id) } }
 
     func addProject(_ name: String, teamId: Int) {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)

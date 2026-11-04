@@ -1,6 +1,7 @@
 // End-to-end check against a running worker: OAuth (DCR + PKCE + passphrase consent) then MCP tool calls.
 // Usage: node scripts/smoke.mjs [baseUrl] [passphrase]
 import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createServer } from "node:http";
 
 const BASE = process.argv[2] ?? "http://localhost:8787";
 const PASS = process.argv[3] ?? "local-dev-passphrase";
@@ -462,6 +463,231 @@ if (inboundSecret) {
     assert(!(await call("list_tasks", { view: "agent_ready" })).some((x) => x.id === agentNewId), "an agent job isn't queued unless ready");
     console.log("✓ inbound: scoped to the sender's team and projects; only ready agent tasks are queued");
   }
+}
+
+// Outbound webhooks. Needs a receiver the Worker can reach and a way to fire its cron, so it only runs locally,
+// with `wrangler dev --test-scheduled` and WEBHOOK_RETRY_BASE_SECONDS=0 (so retries don't wait).
+const cronRuns = BASE.includes("localhost") && (await fetch(`${BASE}/__scheduled`)).ok;
+if (!cronRuns) {
+  console.log("- webhooks: skipped (needs a local wrangler dev --test-scheduled)");
+} else {
+  const received = [];
+  const behaviour = {}; // path -> status to answer with, or "hang"
+  const receiver = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => (raw += chunk));
+    req.on("end", () => {
+      received.push({ path: req.url, raw, at: Date.now(), headers: req.headers, body: JSON.parse(raw) });
+      const answer = behaviour[req.url] ?? 200;
+      if (answer === "hang") return; // never answers: the Worker has to give up by itself
+      res.writeHead(answer).end("this body must not be stored");
+    });
+  });
+  await new Promise((resolve) => receiver.listen(0, "127.0.0.1", resolve));
+  const hook = (path) => `http://127.0.0.1:${receiver.address().port}${path}`;
+  const cron = () => fetch(`${BASE}/__scheduled`).then((r) => r.text());
+  const at = (path) => received.filter((r) => r.path === path);
+  const signed = (r, secret) =>
+    r.headers["x-cc-signature"] === `v1=${createHmac("sha256", secret).update(`${r.headers["x-cc-timestamp"]}.${r.raw}`).digest("hex")}`;
+  const webhookRow = async (id) => (await call("list_webhooks", {})).find((w) => w.id === id);
+
+  const run = randomBytes(4).toString("hex");
+  const teamKey = `hooks-${run}`;
+  const projectName = `Hooks Project ${run}`;
+  await call("save_team", { key: teamKey, name: `Hooks ${run}` });
+  await call("save_team", { key: `${teamKey}-other`, name: `Hooks Other ${run}` });
+  await call("save_project", { name: projectName, team: teamKey });
+  await call("save_project", { name: `Hooks Elsewhere ${run}`, team: teamKey });
+  await call("save_project", { name: `Hooks Foreign ${run}`, team: `${teamKey}-other` });
+  const task = (title, extra = {}) => call("add_task", { title, kind: "human", source: "smoke", team: teamKey, ...extra });
+
+  for (const url of ["http://example.com/x", "https://user:pass@example.com/x", "ftp://example.com/x"]) {
+    assert((await callRaw("add_webhook", { team: teamKey, url, scope: "all" })).isError, `${url} should be refused`);
+  }
+  const foreign = await callRaw("add_webhook", { team: teamKey, url: hook("/nope"), project: `Hooks Foreign ${run}` });
+  assert(foreign.isError && /isn't in this team/.test(foreign.content[0].text), "another team's project is refused");
+  console.log("✓ webhooks: plain http, credentials in URLs and other teams' projects refused");
+
+  const teamWide = await call("add_webhook", { team: teamKey, url: hook("/team"), scope: "all", events: ["task.created", "task.status", "review.published", "review.decided", "comment.added"] });
+  const scoped = await call("add_webhook", { team: teamKey, url: hook("/project"), project: projectName, scope: "all" });
+  const external = await call("add_webhook", { team: teamKey, url: hook("/external") });
+  assert(teamWide.secret && scoped.secret && teamWide.secret !== scoped.secret, "each webhook has its own secret");
+  assert(scoped.project === projectName && external.scope === "external" && !external.events.includes("comment.added"), "defaults and project scope");
+  const listed = await call("list_webhooks", { team: teamKey });
+  assert(listed.length === 3 && !JSON.stringify(listed).includes(teamWide.secret) && !("secret_id" in listed[0]), "the list never shows secrets");
+  console.log("✓ webhooks: add, list; each has its own secret, shown only once");
+
+  // Exactly the events that match each.
+  const inProject = await task("Hooked in project", { project: projectName });
+  const elsewhere = await task("Hooked elsewhere", { project: `Hooks Elsewhere ${run}` });
+  await call("add_task", { title: "Other team", kind: "human", source: "smoke", team: `${teamKey}-other` });
+  await call("update_task", { id: inProject.id, status: "in_progress" });
+  await call("add_comment", { id: inProject.id, body: "A note", author: "agent" });
+  await Promise.all([cron(), cron(), cron()]); // overlapping runs must not double-send
+  await cron();
+  const summary = (path) => at(path).map((r) => `${r.body.type}:${r.body.task.id}`).sort().join();
+  assert(
+    summary("/team") === [`comment.added:${inProject.id}`, `task.created:${elsewhere.id}`, `task.created:${inProject.id}`, `task.status:${inProject.id}`].sort().join(),
+    `team-wide webhook got ${summary("/team")}`,
+  );
+  assert(
+    summary("/project") === [`task.created:${inProject.id}`, `task.status:${inProject.id}`].sort().join(),
+    `project webhook got ${summary("/project")}`,
+  );
+  assert(!at("/external").length, "scope=external skips tasks without an external_ref");
+  console.log("✓ webhooks: team-wide and project-scoped each get exactly what matches, once, even with overlapping runs");
+
+  for (const r of at("/team")) assert(signed(r, teamWide.secret) && !signed(r, scoped.secret), "signed with the webhook's own secret");
+  for (const r of at("/project")) assert(signed(r, scoped.secret) && !signed(r, teamWide.secret), "signed with the webhook's own secret");
+  const status = at("/project").find((r) => r.body.type === "task.status");
+  assert(status.body.previous_status === "new" && status.body.task.status === "in_progress" && status.body.task.key === `CC-${inProject.id}`, "task.status payload");
+  assert(status.body.task.team.key === teamKey && status.body.task.project === projectName && status.body.task.kind === "human", "task payload");
+  assert(status.headers["x-cc-event"] === status.body.id && status.headers["x-cc-event-type"] === "task.status", "event headers");
+  const sameEvent = at("/team").find((r) => r.body.type === "task.status");
+  assert(sameEvent.body.id === status.body.id, "one event id across webhooks");
+  assert(at("/team").find((r) => r.body.type === "comment.added").body.comment.body === "A note", "comment payload");
+  console.log("✓ webhooks: signatures verify with each secret; payloads and event ids as documented");
+
+  // scope=external, through a signed inbound event.
+  if (inboundSecret) {
+    const inboundBody = JSON.stringify({
+      id: `evt-hook-${run}`, source: "smoke", type: "job.create",
+      job: { id: `hook-${run}`, title: "External job", kind: "human", url: "https://example.com/j", requested_by: { name: "Sam" } },
+    });
+    const ts = String(Math.floor(Date.now() / 1000));
+    // Goes to the team that has the inbound secret, so give that team a webhook of its own.
+    const externalHook = await call("add_webhook", { team: inboundTeam, url: hook("/inbound-team") });
+    const res = await fetch(`${BASE}/hooks/inbound`, {
+      method: "POST",
+      headers: { "x-cc-team": inboundTeam, "x-cc-timestamp": ts, "x-cc-signature": `v1=${createHmac("sha256", inboundSecret).update(`${ts}.${inboundBody}`).digest("hex")}` },
+      body: inboundBody,
+    });
+    assert(res.ok, `inbound job failed: ${res.status}`);
+    await call("add_task", { title: "Not external", kind: "human", source: "smoke", team: inboundTeam });
+    await cron();
+    const got = at("/inbound-team");
+    assert(got.length === 1 && got[0].body.task.external_ref.id === `hook-${run}` && got[0].body.task.requested_by.name === "Sam", "scope=external gets only the external task, with its refs");
+    await call("delete_webhook", { id: externalHook.id });
+    console.log("✓ webhooks: scope=external gets tasks from other apps, with external_ref and requested_by");
+  }
+
+  // Reviews. Needs the upload token, as above.
+  if (uploadToken) {
+    const before = at("/project").length;
+    const published = await fetch(`${BASE}/api/publish?task=${inProject.id}&filename=hook.txt&title=Hooked`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${uploadToken}`, "content-type": "text/plain" },
+      body: "webhook smoke",
+    }).then((r) => r.json());
+    const token = published.url.split("/").pop();
+    await fetch(`${BASE}/r/${token}/decision`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Smoke", decision: "approve" }),
+    });
+    await cron();
+    const events = at("/project").slice(before).map((r) => r.body);
+    const pub = events.find((e) => e.type === "review.published");
+    const dec = events.find((e) => e.type === "review.decided");
+    assert(pub?.review.url.endsWith(`/r/${teamKey}/${token}`) && !("token" in pub.review) && pub.review.decision === null, `review.published payload: ${JSON.stringify(pub)}`);
+    assert(dec?.review.decision === "approved" && dec.review.decided_by === "Smoke" && dec.review.url === pub.review.url, `review.decided payload: ${JSON.stringify(dec)}`);
+    console.log("✓ webhooks: review.published and review.decided carry the review's link and decision");
+  }
+
+  // Test, pause, resume.
+  const ping = await call("test_webhook", { id: scoped.id });
+  assert(ping.delivered && ping.last_http === 200, `ping: ${JSON.stringify(ping)}`);
+  const pinged = at("/project").at(-1);
+  assert(pinged.body.type === "ping" && pinged.body.webhook.id === scoped.id && signed(pinged, scoped.secret), "ping is signed");
+  assert((await webhookRow(scoped.id)).last_delivery_ok === true, "last delivery shown");
+
+  const countBefore = at("/project").length;
+  await call("pause_webhook", { id: scoped.id, reason: "smoke" });
+  await call("update_task", { id: inProject.id, status: "ready" });
+  await cron();
+  const paused = await webhookRow(scoped.id);
+  assert(at("/project").length === countBefore && !paused.active && paused.paused_reason === "smoke" && paused.pending === 1, "a paused webhook sends nothing, and queues");
+  const pausedPing = await call("test_webhook", { id: scoped.id });
+  assert(pausedPing.delivered && at("/project").length === countBefore + 1, "a ping still reaches a paused webhook");
+  await call("resume_webhook", { id: scoped.id });
+  await cron();
+  const caughtUp = at("/project").at(-1);
+  assert(caughtUp.body.type === "task.status" && caughtUp.body.task.status === "ready", "resuming sends what queued");
+  assert((await webhookRow(scoped.id)).pending === 0, "nothing left waiting");
+  console.log("✓ webhooks: test sends a signed ping; pause queues; resume catches up");
+
+  // A failing endpoint retries, then pauses with an inbox note, and the other webhook isn't held up.
+  behaviour["/flaky"] = 500;
+  const flaky = await call("add_webhook", { team: teamKey, url: hook("/flaky"), scope: "all", events: ["task.status"] });
+  const failing = await task("Hooked failing");
+  await call("update_task", { id: failing.id, status: "ready" });
+  const healthyBefore = at("/team").length;
+  for (let attempt = 1; attempt <= 7; attempt++) {
+    await cron();
+    assert(at("/flaky").length === attempt, `attempt ${attempt}: ${at("/flaky").length} sent (is WEBHOOK_RETRY_BASE_SECONDS=0 in .dev.vars?)`);
+  }
+  assert(at("/team").length === healthyBefore + 2, "the other webhook got its events on time");
+  assert((await webhookRow(flaky.id)).active, "still active while it has attempts left");
+  assert(!(await call("list_inbox", {})).some((n) => n.task.id === failing.id && /paused/.test(n.body)), "no note yet");
+  await cron();
+  assert(at("/flaky").length === 8, "eighth and last attempt");
+  const stopped = await webhookRow(flaky.id);
+  assert(!stopped.active && /8 failed attempts to deliver task.status \(HTTP 500\)/.test(stopped.paused_reason), `paused: ${stopped.paused_reason}`);
+  assert(stopped.last_delivery_ok === false && stopped.last_delivery_http === 500 && !JSON.stringify(stopped).includes("must not be stored"), "last delivery, without the response body");
+  const note = (await call("list_inbox", {})).filter((n) => n.task.id === failing.id && /Webhook to .* paused/.test(n.body));
+  assert(note.length === 1 && !note[0].body.includes("/flaky"), "one inbox note, naming the host only");
+  await cron();
+  assert(at("/flaky").length === 8, "a paused webhook isn't tried again");
+  console.log("✓ webhooks: failing endpoint retries, pauses with one inbox note, other webhooks unaffected");
+
+  // The failed delivery isn't lost: fixed endpoint, resumed, delivered.
+  behaviour["/flaky"] = 200;
+  await call("resume_webhook", { id: flaky.id });
+  await cron();
+  const recovered = await webhookRow(flaky.id);
+  assert(at("/flaky").length === 9 && recovered.active && recovered.last_delivery_ok && recovered.pending === 0, "resume resends what failed");
+  console.log("✓ webhooks: resuming after a fix delivers what failed");
+
+  // A failed ping costs nothing.
+  behaviour["/flaky"] = 503;
+  const failedPing = await call("test_webhook", { id: flaky.id });
+  assert(!failedPing.delivered && failedPing.last_http === 503 && failedPing.status === "failed", "a failed ping says so");
+  assert((await webhookRow(flaky.id)).active, "and doesn't pause anything");
+
+  // A hung endpoint only delays itself, and a redirect isn't followed.
+  behaviour["/hang"] = "hang";
+  behaviour["/redirect"] = 302;
+  const hung = await call("add_webhook", { team: teamKey, url: hook("/hang"), scope: "all", events: ["task.status"] });
+  const redirected = await call("add_webhook", { team: teamKey, url: hook("/redirect"), scope: "all", events: ["task.status"] });
+  await call("delete_webhook", { id: flaky.id });
+  const slow = await task("Hooked hanging");
+  await call("update_task", { id: slow.id, status: "ready" });
+  const started = Date.now();
+  await cron();
+  const quick = at("/team").at(-1);
+  assert(quick.body.task.id === slow.id && quick.at - started < 5000, `healthy webhook took ${quick.at - started}ms`);
+  const hungRow = await webhookRow(hung.id);
+  assert(hungRow.last_delivery_ok === false && /no answer/.test(hungRow.last_delivery_error) && hungRow.pending === 1, `timed out: ${hungRow.last_delivery_error}`);
+  const redirectedRow = await webhookRow(redirected.id);
+  assert(redirectedRow.last_delivery_ok === false && redirectedRow.last_delivery_http === 302, "a redirect isn't success");
+  console.log("✓ webhooks: a hung endpoint times out without delaying others; redirects aren't followed");
+
+  // Delete: gone, and nothing more is sent.
+  await call("delete_webhook", { id: hung.id });
+  await call("delete_webhook", { id: redirected.id });
+  const gone = await callRaw("delete_webhook", { id: hung.id });
+  assert(gone.isError && /No webhook/.test(gone.content[0].text), "deleting twice says so");
+  const countAtDelete = at("/project").length;
+  await call("delete_webhook", { id: scoped.id });
+  await call("update_task", { id: inProject.id, status: "in_progress" });
+  await cron();
+  assert(at("/project").length === countAtDelete, "a deleted webhook gets nothing");
+  await call("delete_webhook", { id: teamWide.id });
+  await call("delete_webhook", { id: external.id });
+  assert(!(await call("list_webhooks", { team: teamKey })).length, "all gone");
+  receiver.close();
+  receiver.closeAllConnections();
+  console.log("✓ webhooks: delete removes the webhook and what was waiting");
 }
 
 console.log("\nAll checks passed.");

@@ -8,6 +8,9 @@ UPLOAD_TOKEN=local-upload-token
 INBOUND_SECRET_SMOKE_CO=local-inbound-secret
 INBOUND_SECRET_SMOKE_OTHER=local-inbound-secret
 
+# Outbound webhooks: retry at once instead of after 60s, 120s, ... so the smoke test needn't wait.
+WEBHOOK_RETRY_BASE_SECONDS=0
+
 # Email capture (optional)
 AGENTMAIL_INBOX=you@agentmail.to
 ALLOWED_SENDERS=you@example.com

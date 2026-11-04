@@ -5,6 +5,7 @@ import { handleAgentMail, type EmailEnv } from "./email";
 import { handleInbound } from "./inbound";
 import { handleReview, type ReviewEnv } from "./review";
 import { buildServer } from "./tools";
+import { runWebhookCron } from "./webhooks";
 
 type AuthEnv = Env & { OAUTH_PROVIDER: OAuthHelpers };
 
@@ -104,7 +105,7 @@ const mcpHandler = {
   },
 };
 
-export default new OAuthProvider<AuthEnv>({
+const provider = new OAuthProvider<AuthEnv>({
   apiRoute: "/mcp",
   apiHandler: mcpHandler,
   defaultHandler: authHandler,
@@ -120,3 +121,9 @@ export default new OAuthProvider<AuthEnv>({
   // Long-lived access so Slack/web connectors don't need re-auth every hour.
   accessTokenTTL: 60 * 60 * 24,
 });
+
+export default {
+  fetch: (request, env, ctx) => provider.fetch(request, env as AuthEnv, ctx),
+  // Awaited rather than waitUntil, so a failed run shows as failed in the cron's event log.
+  scheduled: (event, env) => runWebhookCron(env, event.scheduledTime),
+} satisfies ExportedHandler<Env>;

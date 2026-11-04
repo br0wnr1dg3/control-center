@@ -62,13 +62,14 @@ So to chain stages that run themselves, approve them all up front: `add_task(rea
 | `list_inbox` / `mark_inbox_read` | Notifications: questions, comments, hand-offs, finished work |
 | `list_teams` / `get_team` | Teams and projects; a team's briefing, repos and project specs |
 | `save_team` / `save_project` | Create or update a team (by key) or project (by name) |
+| `add_webhook` / `list_webhooks` / `test_webhook` / `pause_webhook` / `resume_webhook` / `delete_webhook` | Outbound webhooks for a team or project (see below) |
 
 ## Local dev
 
 ```bash
 supabase start                      # ports 577xx (see supabase/config.toml)
 cd mcp && cp .dev.vars.example .dev.vars   # fill from `supabase status -o env`
-npm run dev                         # http://localhost:8787
+npm run dev                         # http://localhost:8787; GET /__scheduled runs the cron once
 node scripts/smoke.mjs              # full OAuth + tool round-trip
 ```
 
@@ -133,6 +134,62 @@ Sending an event again with the same `id` returns the first answer with `"duplic
 Statuses: `200` applied or duplicate, `400` bad shape, `401` bad signature, `404` no such task (retry if the job may not have arrived yet), `409` id conflict, `413` body over 1 MB, `422` the event can't apply (unknown blocker, cycle, another team's project), `500` retry.
 
 **`ready: true` and `stage.ready` approve work.** A ready agent task starts without further review, in a session that runs with permissions skipped, so a team's secret is as powerful as the owner's approval for that team's inbound tasks. The agent's prompt says the task's words came from outside and aren't the owner's instructions beyond the work itself; that's a guardrail, not a sandbox. Only give a secret to an app you trust, and leave `ready` off for anything built from text its users typed.
+
+## Outbound webhooks (`mcp/src/webhooks.ts`)
+
+Keeps the apps that create and follow work up to date. A team can have several webhooks, each following the whole team or one project, added from the team's settings in the app or with `add_webhook`. Each has its own secret, generated when it's added and shown that once; it's kept in Supabase Vault, and only the sender reads it.
+
+| Option | Values |
+| --- | --- |
+| `project` | Only this project's tasks. Default: the whole team |
+| `scope` | `external` (default): only tasks with an `external_ref`, i.e. made through inbound events. `all`: every task in scope |
+| `events` | `task.created`, `task.status`, `review.published`, `review.decided`, `comment.added`. Default: all but `comment.added`, which is opt-in because it's noisy |
+
+The URL must be https (plain http is only accepted for `localhost` and `127.0.0.1`, for testing).
+
+Every delivery is a signed POST, in the same format as inbound events:
+
+| Header | Value |
+| --- | --- |
+| `X-CC-Webhook` | Webhook id |
+| `X-CC-Event` | Event id, the same on every retry and for every webhook. Use it to ignore repeats |
+| `X-CC-Event-Type` | The event's type |
+| `X-CC-Timestamp` | Unix seconds when this attempt was sent |
+| `X-CC-Signature` | `v1=` + hex HMAC-SHA256 of `<timestamp>.<raw body>`, with the webhook's secret |
+
+To verify: compute the HMAC over the raw bytes received (before parsing), compare in constant time, and reject timestamps more than 5 minutes old.
+
+```jsonc
+{
+  "id": "evt_91a2acd59a164c02978465030f40a042",
+  "type": "task.status",
+  "created_at": "2026-11-04T18:29:01.980+00:00", // when it happened, which on a retry is earlier than the timestamp header
+  "task": {
+    "id": 42, "key": "CC-42", "title": "Cut the video", "status": "in_progress", "kind": "agent", "parent_id": 41,
+    "project": "Video",
+    "team": { "id": 3, "key": "acme", "name": "Acme" },
+    "external_ref": { "source": "myapp", "id": "job_42/cut", "url": "https://myapp.example/jobs/42/cut" }, // null if not from another app
+    "requested_by": { "name": "Sam", "email": "sam@example.com" }                                          // likewise
+  },
+  // Then, depending on the type:
+  "previous_status": "ready", // task.status
+  "review": { "id": 7, "title": "Cut v2", "url": "https://<worker>/r/acme/<token>", "decision": null, "decided_by": null, "decided_at": null },
+  // ^ review.published and review.decided. decision is "approved" or "changes_requested". The url is the private review link: anyone with it can open and comment.
+  "comment": { "id": 9, "author": "agent", "author_name": null, "body": "Markdown", "created_at": "..." }
+  // ^ comment.added. author is me, claude, agent, reviewer or external (one sent through inbound events, so possibly your own: don't mirror those back).
+}
+{ "id": "evt_...", "type": "ping", "created_at": "...", "webhook": { "id": 5, "team": "acme", "project": null } } // a test; has no task
+```
+
+The payload is a snapshot from when the event happened. `task.created` for a job says `new`; if it was created ready, a `task.status` follows.
+
+**Delivery.** Triggers write one row per event and matching webhook to an outbox (`webhook_deliveries`) in the same transaction as the change, so nothing is lost and webhooks fail independently. The Worker's cron sends what's due every minute, in parallel across webhooks, so a slow endpoint only delays itself. Any 2xx is success; anything else, including a redirect (never followed) or no answer in 10 seconds, is retried after 1, 2, 4, 8, 16, 32 and 64 minutes.
+
+- **At least once, roughly in order.** A sender that dies mid-send leaves its claim to expire and the event goes again, and retries overtake newer events. Dedupe on the event id, and use `created_at` to ignore a status older than one you've already applied.
+- **After 8 failed attempts** (about 2 hours) the webhook pauses, with the reason on it and a note in the inbox. Events keep queueing while it's paused, by hand or by failure; resuming sends everything queued or failed. Anything older than 30 days is dropped.
+- **Testing:** `test_webhook` or "Send test" sends a `ping`, even while paused. It's tried once and a failure doesn't count against the webhook. The tool answers at once; the app shows the result as the last delivery within a minute.
+
+MCP tools: `add_webhook`, `list_webhooks`, `test_webhook`, `pause_webhook`, `resume_webhook`, `delete_webhook`.
 
 ## Reviews (`mcp/src/review.ts`, `runner/bin/cc-publish`)
 

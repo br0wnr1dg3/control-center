@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
+import { deliverWebhooks } from "./webhooks";
 
 const kind = z.enum(["human", "agent", "either"]);
 const status = z.enum(["new", "ready", "in_progress", "needs_you", "done", "cancelled"]);
@@ -18,6 +19,8 @@ const repo = z.object({
   path: z.string().optional().describe("Local checkout, e.g. ~/Developer/projects/repo"),
 });
 const teamRef = z.string().describe("Team key or name, e.g. 'personal' or 'flixr'");
+const webhookEvent = z.enum(["task.created", "task.status", "review.published", "review.decided", "comment.added"]);
+const webhookId = z.number().int().positive();
 const views = ["today", "upcoming", "new", "agent_ready", "needs_you", "human", "open", "done_recent"] as const;
 
 const OPEN = "(done,cancelled)";
@@ -681,6 +684,135 @@ export function buildServer(env: Env) {
         ? await db.from("projects").update(patch).eq("id", existing.data.id).select().single()
         : await db.from("projects").insert({ name, ...patch }).select().single();
       return result.error ? fail(result.error.message) : ok(result.data);
+    },
+  );
+
+  // ---------- Outbound webhooks ----------
+
+  server.registerTool(
+    "add_webhook",
+    {
+      description:
+        "Subscribe a URL to a team's events, or one project's. A team can have several. Returns the signing secret, " +
+        "once: hand it straight to the receiving system, and don't put it in tasks, comments or files.",
+      inputSchema: z.object({
+        team: teamRef,
+        url: z.string().url().describe("https; the receiver verifies each request as described in the README"),
+        project: z.string().optional().describe("Only this project's tasks. Omit for the whole team"),
+        events: z
+          .array(webhookEvent)
+          .min(1)
+          .optional()
+          .describe("Default: everything except comment.added, which is opt-in because it's noisy"),
+        scope: z
+          .enum(["external", "all"])
+          .default("external")
+          .describe("external: only tasks that came from another app (with an external_ref). all: every task in scope"),
+      }),
+    },
+    async ({ team, url, project, events, scope }) => {
+      let teamId: number;
+      try {
+        teamId = await resolveTeam(db, team);
+      } catch (e) {
+        return fail((e as Error).message);
+      }
+      let projectId: number | null = null;
+      if (project) {
+        const found = await db.from("projects").select("id").ilike("name", project).maybeSingle();
+        if (found.error) return fail(found.error.message);
+        if (!found.data) return fail(`No project "${project}".`);
+        projectId = found.data.id;
+      }
+      const { data, error } = await db.rpc("create_webhook", {
+        p_team: teamId,
+        p_url: url,
+        p_project: projectId,
+        p_events: events ?? null,
+        p_scope: scope,
+      });
+      if (error) return fail(error.code === "23514" ? "The URL must be https, with no credentials in it." : error.message);
+      return ok(data);
+    },
+  );
+
+  server.registerTool(
+    "list_webhooks",
+    {
+      description: "List webhooks with whether each is active or paused (and why), how its last delivery went and how many events are waiting.",
+      inputSchema: z.object({ team: teamRef.optional() }),
+    },
+    async ({ team }) => {
+      let query = db.from("webhook_overview").select("*").order("id");
+      if (team) {
+        try {
+          query = query.eq("team_id", await resolveTeam(db, team));
+        } catch (e) {
+          return fail((e as Error).message);
+        }
+      }
+      const { data, error } = await query;
+      return error ? fail(error.message) : ok(data);
+    },
+  );
+
+  server.registerTool(
+    "test_webhook",
+    {
+      description:
+        "Send a signed ping now and report the answer. Works on a paused webhook, to check it before resuming; a failed ping isn't retried and doesn't count against the webhook.",
+      inputSchema: z.object({ id: webhookId }),
+    },
+    async ({ id }) => {
+      const { data: delivery, error } = await db.rpc("test_webhook", { p_webhook: id });
+      if (error) return fail(error.message);
+      await deliverWebhooks(env, delivery);
+      const result = await db
+        .from("webhook_deliveries")
+        .select("status,last_http,last_error,event_id")
+        .eq("id", delivery)
+        .single();
+      if (result.error) return fail(result.error.message);
+      // A cron run can claim it first, in which case it's on its way and the last delivery will show how it went.
+      return ok({ delivered: result.data.status === "delivered", ...result.data });
+    },
+  );
+
+  const setActive = async (id: number, active: boolean, reason?: string) => {
+    const { error } = await db.rpc("set_webhook_active", { p_webhook: id, p_active: active, p_reason: reason ?? null });
+    if (error) return fail(error.message);
+    const { data, error: readError } = await db.from("webhook_overview").select("*").eq("id", id).single();
+    return readError ? fail(readError.message) : ok(data);
+  };
+
+  server.registerTool(
+    "pause_webhook",
+    {
+      description: "Stop sending to a webhook. Its events keep queueing, and go out if it's resumed (events older than 30 days are dropped).",
+      inputSchema: z.object({ id: webhookId, reason: z.string().max(500).optional() }),
+    },
+    async ({ id, reason }) => setActive(id, false, reason),
+  );
+
+  server.registerTool(
+    "resume_webhook",
+    {
+      description: "Start sending to a paused webhook again, including everything that queued or failed while it was paused.",
+      inputSchema: z.object({ id: webhookId }),
+    },
+    async ({ id }) => setActive(id, true),
+  );
+
+  server.registerTool(
+    "delete_webhook",
+    {
+      description: "Delete a webhook, its secret and anything still waiting to be sent to it.",
+      inputSchema: z.object({ id: webhookId }),
+    },
+    async ({ id }) => {
+      const { data, error } = await db.from("webhooks").delete().eq("id", id).select("id");
+      if (error) return fail(error.message);
+      return data.length ? ok({ deleted: id }) : fail(`No webhook ${id}.`);
     },
   );
 

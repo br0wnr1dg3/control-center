@@ -52,6 +52,44 @@ struct ProjectSpec: Codable, Identifiable, Equatable {
     }
 }
 
+/// A subscriber to a team's (or one project's) events. See README, "Outbound webhooks".
+struct Webhook: Codable, Identifiable, Equatable {
+    /// `optIn` events aren't on by default, because they're noisy.
+    static let events: [(id: String, label: String, optIn: Bool)] = [
+        ("task.created", "Task created", false),
+        ("task.status", "Status changed", false),
+        ("review.published", "Review published", false),
+        ("review.decided", "Review decided", false),
+        ("comment.added", "Comment added", true),
+    ]
+
+    let id: Int
+    var teamId: Int
+    var projectId: Int?
+    var project: String?
+    var url: String
+    var events: [String]
+    var scope: String      // external | all
+    var active: Bool
+    var pausedReason: String?
+    var lastDeliveryAt: String?
+    var lastDeliveryOk: Bool?
+    var lastDeliveryHttp: Int?
+    var lastDeliveryError: String?
+    var pending: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id, project, url, events, scope, active, pending
+        case teamId = "team_id"
+        case projectId = "project_id"
+        case pausedReason = "paused_reason"
+        case lastDeliveryAt = "last_delivery_at"
+        case lastDeliveryOk = "last_delivery_ok"
+        case lastDeliveryHttp = "last_delivery_http"
+        case lastDeliveryError = "last_delivery_error"
+    }
+}
+
 extension Color {
     init?(hex: String) {
         let digits = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))

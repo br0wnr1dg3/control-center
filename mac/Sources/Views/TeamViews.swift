@@ -164,6 +164,10 @@ struct TeamSettingsView: View {
                     }
                 }
                 projectsSection
+                group("Webhooks",
+                      note: "Tell other apps when tasks, reviews and approvals change. Each webhook has its own signing secret and can follow the whole team or one project. A failed delivery is retried for about two hours, then the webhook pauses and tells you in the inbox.") {
+                    WebhooksSection(team: team, projects: projects)
+                }
             }
             .padding(.horizontal, 40)
             .padding(.vertical, 28)
