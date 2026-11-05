@@ -1,5 +1,6 @@
-// Linear sync: issues delegated to Control Center become ready agent tasks, and what happens to those
-// tasks goes back to the issue as comments and status changes.
+// Linear sync: issues delegated to Control Center become agent tasks, and what happens to those tasks goes
+// back to the issue as comments and status changes. A delegation only approves the work if it was made by
+// one of the team's approvers; anyone else's waits as new for the owner.
 //
 // In: every CC_LINEAR_MINUTES the runner lists what's delegated to the app and hands each issue to
 // linear_upsert_issue in Postgres, which keeps it to one task per issue. Out: triggers put updates in
@@ -85,6 +86,18 @@ export const ISSUES_QUERY = `query Issues($filter: IssueFilter, $after: String) 
   }
 }`;
 
+// Only asked when a delegation decides something, so not on every poll for every issue. Linear doesn't
+// document which way history comes back, hence every page and the latest by date.
+export const DELEGATION_QUERY = `query Delegation($id: String!, $after: String) {
+  viewer { id }
+  issue(id: $id) {
+    history(first: 50, after: $after) {
+      nodes { createdAt toDelegate { id } actor { name email } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}`;
+
 export const ISSUE_QUERY = `query Issue($id: String!) {
   viewer { id }
   issue(id: $id) {
@@ -128,8 +141,31 @@ const issuePayload = (issue) => ({
   requested_by: issue.creator ? { name: issue.creator.name, email: issue.creator.email } : null,
 });
 
-const upsert = (db, team, issue, mirror) =>
-  db("rpc/linear_upsert_issue", { method: "POST", body: { p_team: team, p_issue: issuePayload(issue), p_mirror: mirror } });
+const upsert = (db, team, issue, mirror, approved = false, delegatedBy = null) =>
+  db("rpc/linear_upsert_issue", {
+    method: "POST",
+    body: { p_team: team, p_issue: issuePayload(issue), p_mirror: mirror, p_approved: approved, p_delegated_by: delegatedBy },
+  });
+
+// Who last delegated this issue to the app. Null if Linear doesn't say, as for an automation or integration.
+export async function delegatedBy(issueId) {
+  let latest = null;
+  let after = null;
+  do {
+    const { viewer, issue } = await linear(DELEGATION_QUERY, { id: issueId, after });
+    for (const change of issue.history.nodes) {
+      if (change.toDelegate?.id !== viewer.id) continue;
+      if (!latest || change.createdAt > latest.createdAt) latest = change;
+    }
+    after = issue.history.pageInfo.hasNextPage ? issue.history.pageInfo.endCursor : null;
+  } while (after);
+  return latest?.actor ?? null;
+}
+
+export function isApprover(team, actor) {
+  const email = actor?.email?.trim().toLowerCase();
+  return Boolean(email) && (team.linear_approvers ?? []).some((a) => a.trim().toLowerCase() === email);
+}
 
 // A Linear team key the settings give to two teams goes to the first, and says so.
 export function teamsByLinearKey(teams, log = () => {}) {
@@ -153,12 +189,13 @@ const openLinearTasks = (db, teamIds, mirror) =>
 const taskNote = (db, task_id, kind, body) =>
   db("task_events", { method: "POST", body: { task_id, kind, body, actor: "runner" }, prefer: "return=minimal" });
 
-// Delegation taken back, or the issue closed in Linear. Work that hasn't started never does. A session
-// that's running may be nearly done, so that's for the owner to decide: the inbox hears about it once.
+// Delegation taken back, or the issue closed in Linear. Work that hasn't started never does, and a new
+// task hasn't, whatever session it had before it was reopened. A session that's running may be nearly
+// done, so that's for the owner to decide: the inbox hears about it once.
 async function undelegated(db, task) {
   const { id } = task.external_ref;
-  if (task.status === "ready" && !task.session_id) {
-    await db(`tasks?id=eq.${task.id}&status=eq.ready`, { method: "PATCH", body: { status: "cancelled" }, prefer: "return=minimal" });
+  if (task.status === "new" || (task.status === "ready" && !task.session_id)) {
+    await db(`tasks?id=eq.${task.id}&status=eq.${task.status}`, { method: "PATCH", body: { status: "cancelled" }, prefer: "return=minimal" });
     await taskNote(db, task.id, "status", `cancelled: ${id} is no longer delegated in Linear`);
     return;
   }
@@ -170,7 +207,7 @@ async function undelegated(db, task) {
 }
 
 export async function pollIssues(db, log = () => {}) {
-  const teams = await db("teams?linear_teams=not.eq.{}&select=id,key,linear_teams,linear_assignee");
+  const teams = await db("teams?linear_teams=not.eq.{}&select=id,key,linear_teams,linear_assignee,linear_approvers");
   if (!teams.length) return false;
   if (!(await hasCredentials())) return false;
 
@@ -178,18 +215,24 @@ export async function pollIssues(db, log = () => {}) {
   const keys = [...byKey.keys()];
   const teamIds = teams.map((t) => t.id);
 
+  const open = await openLinearTasks(db, teamIds, false);
+  // An agent already has these, so who delegated them no longer decides anything.
+  const taken = new Set(open.filter((t) => t.kind === "agent").map((t) => t.external_ref.linear_id));
+
   const delegated = await listIssues({
     delegate: { isMe: { eq: true } },
     team: { key: { in: keys } },
     state: { type: { nin: ["completed", "canceled"] } },
   });
   for (const issue of delegated) {
-    const result = await upsert(db, byKey.get(issue.team.key.toUpperCase()).id, issue, false);
+    const team = byKey.get(issue.team.key.toUpperCase());
+    const actor = taken.has(issue.id) ? null : await delegatedBy(issue.id);
+    const result = await upsert(db, team.id, issue, false, isApprover(team, actor), actor?.name ?? actor?.email ?? null);
     if (result.action !== "none") log(`linear: ${result.action} CC-${result.task} from ${issue.identifier}`);
   }
 
   const delegatedIds = new Set(delegated.map((i) => i.id));
-  for (const task of await openLinearTasks(db, teamIds, false)) {
+  for (const task of open) {
     // Only an agent's: a hand-back keeps its task open for the owner after the delegate comes off.
     if (task.kind === "agent" && !delegatedIds.has(task.external_ref.linear_id)) await undelegated(db, task);
   }

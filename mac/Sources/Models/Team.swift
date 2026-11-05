@@ -23,6 +23,8 @@ struct Team: Codable, Identifiable, Equatable, Hashable {
     var linearReviewState: String?   // status for an open PR; nil finds one with "review" in its name
     var linearDoneState: String?     // status for finished work; nil never marks it done
     var linearAssignee: String?      // email: also show this person's issues, read-only; nil is off
+    var linearApprovers: [String]?   // emails whose delegations start work; anyone else's wait as new
+    var linearPostProgress: Bool?    // also post update_task logs to the issue
 
     enum CodingKeys: String, CodingKey {
         case id, key, name, kind, color, context, repos, workdir, github
@@ -31,6 +33,8 @@ struct Team: Codable, Identifiable, Equatable, Hashable {
         case linearReviewState = "linear_review_state"
         case linearDoneState = "linear_done_state"
         case linearAssignee = "linear_assignee"
+        case linearApprovers = "linear_approvers"
+        case linearPostProgress = "linear_post_progress"
         case sortOrder = "sort_order"
     }
 

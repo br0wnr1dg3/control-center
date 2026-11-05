@@ -23,4 +23,4 @@ update repos set base_branch = 'main' where path = '~/Developer/projects/acme/we
 update repos set hidden = true where path = '~/Developer/projects/acme/old-copy-of-something';
 
 -- Linear: which Linear teams belong to a team (see README for setting up the app).
-update teams set linear_teams = '{ENG}' where key = 'acme';
+update teams set linear_teams = '{ENG}', linear_approvers = '{you@example.com}' where key = 'acme';

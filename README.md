@@ -142,7 +142,7 @@ Keeps the apps that create and follow work up to date. A team can have several w
 | Option | Values |
 | --- | --- |
 | `project` | Only this project's tasks. Default: the whole team |
-| `scope` | `external` (default): only tasks with an `external_ref`, i.e. made through inbound events. `all`: every task in scope |
+| `scope` | `external` (default): only tasks with an `external_ref`, i.e. made through inbound events or from Linear. `all`: every task in scope |
 | `events` | `task.created`, `task.status`, `review.published`, `review.decided`, `comment.added`. Default: all but `comment.added`, which is opt-in because it's noisy |
 
 The URL must be https (plain http is only accepted for `localhost` and `127.0.0.1`, for testing).
@@ -193,28 +193,30 @@ MCP tools: `add_webhook`, `list_webhooks`, `test_webhook`, `pause_webhook`, `res
 
 ## Linear (`runner/linear.mjs`)
 
-Delegate a Linear issue to the Control Center app and an agent starts on it; what the agent does goes back to the issue, so nobody copies updates across. The runner checks Linear every `CC_LINEAR_MINUTES` (3).
+Delegate a Linear issue to the Control Center app and it becomes an agent's task; what the agent does goes back to the issue, so nobody copies updates across. The runner checks Linear every `CC_LINEAR_MINUTES` (3).
 
-**Coming in.** A delegated, open issue in a mapped Linear team becomes one ready agent task, with `external_ref` `{source: "linear", id: "ENG-123", url, linear_id}` and the issue's creator as `requested_by`. Its project comes along unless another team already has a project of that name. The repo is left empty for the runner to match or the agent to ask. Edits to the title, description, priority or due date reach the task, though a session already running keeps the brief it started with.
+**Coming in.** A delegated, open issue in a mapped Linear team becomes one agent task (`ready` or `new`, see below), with `external_ref` `{source: "linear", id: "ENG-123", url, linear_id}` and the issue's creator as `requested_by`. Its project comes along unless another team already has a project of that name. The repo is left empty for the runner to match or the agent to ask. Edits to the title, description, priority or due date reach the task, though a session already running keeps the brief it started with.
 
 | On the board | On the Linear issue |
 | --- | --- |
 | Task starts | First `started` status, if it was in backlog or todo. Triage is left to a person |
-| Agent's `add_comment`, `update_task` log | Comment |
+| Agent's `add_comment` (`author: "agent"`) | Comment |
+| `update_task` log | Comment, only if the team turns on "Also post progress logs to the issue" (off by default: too chatty for an issue clients read) |
 | `needs_you` (still in the inbox too) | Comment, "Waiting on <owner>" |
 | PR link added with `add_links` | Comment, and the review status: the team's setting, else a `started` status with "review" in its name. Never backwards |
 | Done | Comment with the summary, delegate removed. The status only moves if the team has a Done status set |
 | Handed back to the owner, or cancelled | Comment, delegate removed |
 
-Comments from the owner and reviewers, and the runner's own notes, stay on the board. Updates wait in `linear_outbox` (written by triggers, so any client's changes count), go out in order per task, and are retried for as long as Linear is unreachable; the inbox hears after a few failures.
+Comments from the owner, reviewers and the owner's own Claude sessions (author `claude`), and the runner's own notes, stay on the board. Updates wait in `linear_outbox` (written by triggers, so any client's changes count), go out in order per task, and are retried for as long as Linear is unreachable; the inbox hears after a few failures.
 
-- **Delegating again** reopens the same task. Removing the delegate when work finishes is what makes that detectable, since an issue left delegated would look the same as one delegated a second time.
-- **Taken back** (delegate removed, or the issue closed): a task that hasn't started is cancelled; a running session carries on and the inbox is told once.
+- **Delegating again** reopens the same task, under the same rule: `ready` if an approver did it, otherwise `new`. Removing the delegate when work finishes is what makes that detectable, since an issue left delegated would look the same as one delegated a second time.
+- **Taken back** (delegate removed, or the issue closed): a task that's `new` or hasn't started is cancelled; a running session carries on and the inbox is told once.
+- **Outbound webhooks:** these tasks have an `external_ref`, so a team's webhooks with scope `external` fire for them too, including the assigned-issue tasks below.
 - **Assigned issues** (optional, off by default): set a team's "Also show issues assigned to" to an email and that person's open, undelegated issues appear as human tasks on Today. They report nothing back. Ticking one off doesn't touch Linear; one that closes or moves to someone else in Linear is cancelled here.
 
 **Not yet:** replies written on the Linear issue aren't read, so questions are answered on the board. Webhooks for instant pickup and Linear's agent session panel are phase 2.
 
-**Delegating approves work.** A ready agent task starts without further review in a session that runs with permissions skipped, so anyone who can delegate in a mapped Linear team can start one. Map only teams whose members you trust that far. The agent's prompt says the issue's words aren't the owner's instructions beyond the work itself; that's a guardrail, not a sandbox. Everything the agent posts is visible to whoever reads the issue, and its prompt tells it so, but nothing filters what it writes.
+**Only an approver's delegation approves work.** A ready agent task starts without further review in a session that runs with permissions skipped, so delegating mustn't approve work for just anyone. The runner reads who last delegated the issue from its Linear history. If their Linear email is in the team's **Approvers** setting the task is `ready`. Anyone else's, or one Linear names no person for (an automation, or a delegate set when the issue was created, if Linear doesn't record that as a change), arrives as `new` with a note in the inbox, and runs once the owner sets it to ready. Approvers are empty by default, so everything arrives as `new` until you add your own email. The issue's title and description come from whoever wrote them, not from the approver, so the agent's prompt says they aren't the owner's instructions beyond the work itself; that's a guardrail, not a sandbox. Everything the agent posts is visible to whoever reads the issue, and its prompt tells it so, but nothing filters what it writes.
 
 ### Setting it up
 
@@ -233,7 +235,7 @@ security add-generic-password -a control-center -s "control-center linear client
 security add-generic-password -a control-center -s "control-center linear client secret" -w
 ```
 
-Then in the app, under each company's team settings → **Linear**, enter the Linear team keys that belong to it. That's what turns the sync on. Optionally set its review and done statuses.
+Then in the app, under each company's team settings → **Linear**, enter the Linear team keys that belong to it. That's what turns the sync on. Add your Linear email to **Approvers** so your own delegations start by themselves. Optionally set its review and done statuses, and turn on progress logs.
 
 To test locally: `CC_SUPABASE_URL=http://127.0.0.1:57721 CC_SERVICE_KEY=<demo key> node --test runner/linear.test.mjs` runs the whole flow against the local database and a fake Linear.
 

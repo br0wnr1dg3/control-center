@@ -115,6 +115,8 @@ struct TeamSettingsView: View {
     @State private var linearReviewState = ""
     @State private var linearDoneState = ""
     @State private var linearAssignee = ""
+    @State private var linearApprovers = ""
+    @State private var linearPostProgress = false
     @State private var newProject = ""
 
     private var projects: [ProjectSpec] { store.projectSpecs.filter { $0.teamId == team.id } }
@@ -193,12 +195,15 @@ struct TeamSettingsView: View {
         linearReviewState = team.linearReviewState ?? ""
         linearDoneState = team.linearDoneState ?? ""
         linearAssignee = team.linearAssignee ?? ""
+        linearApprovers = (team.linearApprovers ?? []).joined(separator: ", ")
+        linearPostProgress = team.linearPostProgress ?? false
     }
 
     private var linearSection: some View {
-        group("Linear", note: "Issues from these Linear teams that are delegated to Control Center become ready agent tasks here, and an agent starts on them without further review. Their progress goes back to the issue. Needs the Linear app set up on the runner (see README).") {
+        group("Linear", note: "Issues from these Linear teams that are delegated to Control Center become agent tasks here. An agent starts straight away if an approver delegated it; anyone else's waits as New until you approve it. Progress goes back to the issue. Needs the Linear app set up on the runner (see README).") {
             VStack(alignment: .leading, spacing: 8) {
                 linearField("Linear teams", "Team keys, e.g. ENG, OPS", $linearTeams, saveLinearTeams)
+                linearField("Approvers", "Linear emails whose delegations start work. Empty: all wait as New", $linearApprovers, saveLinearApprovers)
                 linearField("Review status", "A started status with “review” in its name", $linearReviewState) {
                     saveLinear("linear_review_state", linearReviewState) { $0.linearReviewState = $1 }
                 }
@@ -208,6 +213,11 @@ struct TeamSettingsView: View {
                 linearField("Also show issues assigned to", "Off, or an email: read-only tasks on Today", $linearAssignee) {
                     saveLinear("linear_assignee", linearAssignee) { $0.linearAssignee = $1 }
                 }
+                Toggle("Also post progress logs to the issue", isOn: $linearPostProgress)
+                    .onChange(of: linearPostProgress) { _, on in
+                        guard on != (team.linearPostProgress ?? false) else { return }
+                        store.updateTeam(team, ["linear_post_progress": on]) { $0.linearPostProgress = on }
+                    }
             }
         }
     }
@@ -228,6 +238,15 @@ struct TeamSettingsView: View {
         linearTeams = keys.joined(separator: ", ")
         guard keys != (team.linearTeams ?? []) else { return }
         store.updateTeam(team, ["linear_teams": keys]) { $0.linearTeams = keys }
+    }
+
+    private func saveLinearApprovers() {
+        let emails = linearApprovers
+            .split(whereSeparator: { $0 == "," || $0.isWhitespace })
+            .map { $0.lowercased() }
+        linearApprovers = emails.joined(separator: ", ")
+        guard emails != (team.linearApprovers ?? []) else { return }
+        store.updateTeam(team, ["linear_approvers": emails]) { $0.linearApprovers = emails }
     }
 
     private func saveLinear(_ column: String, _ text: String, _ apply: @escaping (inout Team, String?) -> Void) {

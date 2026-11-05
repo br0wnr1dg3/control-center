@@ -23,7 +23,11 @@ const state = (id) => STATES.find((s) => s.id === id);
 
 // ---------- A fake Linear, holding issues and recording what's done to them ----------
 
-let issues, comments, failNext;
+const OWNER = { name: "Pat", email: "pat@example.com" };
+const COLLEAGUE = { name: "Riley", email: "riley@example.com" };
+const HISTORY_PAGE = 2;
+
+let issues, comments, failNext, historyNewestFirst, historyLookups;
 
 function matches(issue, f) {
   if (f.delegate?.isMe && issue.delegate !== VIEWER) return false;
@@ -34,6 +38,17 @@ function matches(issue, f) {
   if (f.state?.type?.nin?.includes(type)) return false;
   if (f.state?.type?.in && !f.state.type.in.includes(type)) return false;
   return true;
+}
+
+let tick = 0;
+function record(i, toDelegate, actor) {
+  i.history.push({ createdAt: new Date(Date.UTC(2026, 0, 1, 0, 0, ++tick)).toISOString(), toDelegate: toDelegate ? { id: toDelegate } : null, actor });
+}
+
+// As it happens in Linear: the delegate changes, and the history says who did it.
+function delegate(i, actor = OWNER) {
+  i.delegate = VIEWER;
+  record(i, VIEWER, actor);
 }
 
 const server = createServer((req, res) => {
@@ -56,6 +71,15 @@ const server = createServer((req, res) => {
       }));
       return send({ data: { issues: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } });
     }
+    if (name === "Delegation") {
+      if (!variables.after) historyLookups++;
+      const all = [...issues.get(variables.id).history];
+      if (historyNewestFirst) all.reverse();
+      const start = Number(variables.after ?? 0);
+      const nodes = all.slice(start, start + HISTORY_PAGE);
+      const hasNextPage = start + HISTORY_PAGE < all.length;
+      return send({ data: { viewer: { id: VIEWER }, issue: { history: { nodes, pageInfo: { hasNextPage, endCursor: hasNextPage ? String(start + HISTORY_PAGE) : null } } } } });
+    }
     if (name === "Issue") {
       const i = issues.get(variables.id);
       if (!i) return send({ errors: [{ message: "Entity not found: Issue" }] });
@@ -64,7 +88,10 @@ const server = createServer((req, res) => {
     if (name === "IssueUpdate") {
       const i = issues.get(variables.id);
       if (variables.input.stateId) i.state = variables.input.stateId;
-      if ("delegateId" in variables.input) i.delegate = variables.input.delegateId;
+      if ("delegateId" in variables.input) {
+        i.delegate = variables.input.delegateId;
+        record(i, null, null); // the app took itself off
+      }
       return send({ data: { issueUpdate: { success: true } } });
     }
     if (name === "CommentCreate") {
@@ -92,10 +119,12 @@ let linear, team, other;
 const stamp = Date.now();
 let counter = 0;
 
-function issue(fields = {}) {
+// Delegated by the owner unless it says otherwise.
+function issue({ by = OWNER, ...fields } = {}) {
   const n = ++counter;
-  const i = { id: `issue-${stamp}-${n}`, identifier: `TST${stamp % 100000}-${n}`, title: `Issue ${n}`, description: "Fix it", team: "TST", state: "todo", delegate: VIEWER, ...fields };
+  const i = { id: `issue-${stamp}-${n}`, identifier: `TST${stamp % 100000}-${n}`, title: `Issue ${n}`, description: "Fix it", team: "TST", state: "todo", delegate: null, history: [], ...fields };
   issues.set(i.id, i);
+  if (!("delegate" in fields)) delegate(i, by);
   return i;
 }
 
@@ -115,7 +144,7 @@ before(async () => {
   process.env.CC_LINEAR_API = `http://127.0.0.1:${server.address().port}`;
   process.env.CC_LINEAR_TOKEN = "test";
   linear = await import("./linear.mjs");
-  [team] = await db("teams", { method: "POST", body: { key: `linear-test-${stamp}`, name: `Linear test ${stamp}`, linear_teams: ["TST"] } });
+  [team] = await db("teams", { method: "POST", body: { key: `linear-test-${stamp}`, name: `Linear test ${stamp}`, linear_teams: ["TST"], linear_approvers: [OWNER.email] } });
   [other] = await db("teams", { method: "POST", body: { key: `linear-other-${stamp}`, name: `Linear other ${stamp}` } });
 });
 
@@ -130,13 +159,15 @@ beforeEach(async () => {
   issues = new Map();
   comments = [];
   failNext = null;
+  historyNewestFirst = false;
+  historyLookups = 0;
   await db(`tasks?team_id=eq.${team.id}`, { method: "DELETE" });
-  await db(`teams?id=eq.${team.id}`, { method: "PATCH", body: { linear_assignee: null, linear_done_state: null, linear_review_state: null } });
+  await db(`teams?id=eq.${team.id}`, { method: "PATCH", body: { linear_assignee: null, linear_done_state: null, linear_review_state: null, linear_approvers: [OWNER.email], linear_post_progress: false } });
 });
 
 // ---------- In ----------
 
-test("a delegated issue becomes exactly one ready agent task, linked to it", async () => {
+test("an issue the owner delegates becomes exactly one ready agent task, linked to it", async () => {
   const i = issue();
   await Promise.all([poll(), poll(), poll()]);
   await poll();
@@ -196,6 +227,168 @@ test("editing or moving the issue updates the one task", async () => {
   assert.equal(t.status, "ready");
 });
 
+// ---------- Who can approve work ----------
+
+const inboxOf = (id) => db(`notifications?task_id=eq.${id}&kind=eq.handoff&select=body`);
+
+test("the owner's delegation is ready and quiet; anyone else's waits as new, with a note in the inbox", async () => {
+  const mine = issue();
+  const theirs = issue({ by: COLLEAGUE });
+  await poll();
+  await poll();
+  const [m, t] = [await taskOf(mine), await taskOf(theirs)];
+  assert.equal(m.status, "ready");
+  assert.equal((await inboxOf(m.id)).length, 0);
+  assert.equal(t.status, "new");
+  assert.equal(t.kind, "agent");
+  const inbox = await inboxOf(t.id);
+  assert.equal(inbox.length, 1); // not once per poll
+  assert.match(inbox[0].body, /^Riley delegated .+ It starts once you approve it/);
+});
+
+test("a task waiting for approval runs once the owner approves it, and reports as usual", async () => {
+  const i = issue({ by: COLLEAGUE });
+  await poll();
+  const { id } = await taskOf(i);
+  await poll();
+  assert.equal((await taskOf(i)).status, "new"); // polling doesn't approve it
+  await patch(id, { status: "ready" });
+  await poll();
+  assert.equal((await taskOf(i)).status, "ready"); // nor undo that
+  await patch(id, { status: "in_progress" });
+  await drain();
+  assert.equal(i.state, "doing");
+});
+
+test("no approvers set: even the owner's delegation waits", async () => {
+  await db(`teams?id=eq.${team.id}`, { method: "PATCH", body: { linear_approvers: [] } });
+  const i = issue();
+  await poll();
+  assert.equal((await taskOf(i)).status, "new");
+});
+
+test("approvers match on email, whatever its case", async () => {
+  await db(`teams?id=eq.${team.id}`, { method: "PATCH", body: { linear_approvers: [" PAT@Example.com "] } });
+  const i = issue();
+  await poll();
+  assert.equal((await taskOf(i)).status, "ready");
+});
+
+test("nobody named means no approval: an automation, or no history of the delegation", async () => {
+  const automated = issue({ by: null });
+  const unrecorded = issue({ delegate: VIEWER });
+  await poll();
+  for (const i of [automated, unrecorded]) {
+    const t = await taskOf(i);
+    assert.equal(t.status, "new");
+    assert.match((await inboxOf(t.id))[0].body, /^Someone delegated/);
+  }
+});
+
+test("the latest delegation decides, across pages, whichever way Linear orders them", async () => {
+  for (const newestFirst of [false, true]) {
+    historyNewestFirst = newestFirst;
+    const toThem = issue();
+    toThem.delegate = null;
+    record(toThem, null, OWNER);
+    record(toThem, "another-agent", OWNER); // someone else's delegate, by an approver, doesn't count
+    delegate(toThem, COLLEAGUE);
+    const toMe = issue({ by: COLLEAGUE });
+    toMe.delegate = null;
+    record(toMe, null, COLLEAGUE);
+    record(toMe, null, COLLEAGUE);
+    delegate(toMe, OWNER);
+    await poll();
+    assert.equal((await taskOf(toThem)).status, "new");
+    assert.equal((await taskOf(toMe)).status, "ready");
+    await db(`tasks?team_id=eq.${team.id}`, { method: "DELETE" });
+  }
+});
+
+test("history is only read when a delegation decides something", async () => {
+  const i = issue();
+  await poll();
+  assert.equal(historyLookups, 1);
+  await poll();
+  await poll();
+  assert.equal(historyLookups, 1);
+  await patch((await taskOf(i)).id, { status: "done" });
+  await drain();
+  delegate(i);
+  await poll();
+  assert.equal(historyLookups, 2);
+});
+
+test("delegated again: ready if the owner did it, new with an inbox note if anyone else did", async () => {
+  const i = issue();
+  await poll();
+  const { id } = await taskOf(i);
+  await patch(id, { status: "done" });
+  await drain();
+
+  delegate(i, COLLEAGUE);
+  await poll();
+  await poll();
+  let t = await taskOf(i);
+  assert.equal(t.id, id);
+  assert.equal(t.status, "new");
+  assert.equal((await inboxOf(id)).length, 1);
+
+  await patch(id, { status: "cancelled" }); // the owner says no
+  await drain();
+  assert.equal(i.delegate, null);
+  delegate(i, OWNER);
+  await poll();
+  t = await taskOf(i);
+  assert.equal(t.status, "ready");
+  assert.equal((await inboxOf(id)).length, 1);
+});
+
+test("a hand-back delegated again by someone else goes back to the agent, but waits", async () => {
+  const i = issue();
+  await poll();
+  const { id } = await taskOf(i);
+  await patch(id, { status: "ready", kind: "human" });
+  await drain();
+  const before = (await inboxOf(id)).length;
+  delegate(i, COLLEAGUE);
+  await poll();
+  const t = await taskOf(i);
+  assert.equal(t.kind, "agent");
+  assert.equal(t.status, "new");
+  assert.equal((await inboxOf(id)).length, before + 1);
+});
+
+test("a new task taken back is cancelled, even one reopened with a session to resume", async () => {
+  const fresh = issue({ by: COLLEAGUE });
+  const reopened = issue();
+  await poll();
+  const r = await taskOf(reopened);
+  await patch(r.id, { status: "done", session_id: "33333333-3333-4333-8333-333333333333", worktree: "/tmp/kept" });
+  await drain();
+  delegate(reopened, COLLEAGUE);
+  await poll();
+  const waiting = await taskOf(reopened);
+  assert.equal(waiting.status, "new");
+  assert.equal(waiting.session_id, "33333333-3333-4333-8333-333333333333");
+
+  fresh.delegate = null;
+  reopened.delegate = null;
+  await poll();
+  assert.equal((await taskOf(fresh)).status, "cancelled");
+  assert.equal((await taskOf(reopened)).status, "cancelled");
+});
+
+test("these tasks fire a team's outbound webhooks with scope external", async () => {
+  await db("rpc/create_webhook", { method: "POST", body: { p_team: team.id, p_url: "http://127.0.0.1:9/hook" } });
+  const i = issue();
+  await poll();
+  const { id } = await taskOf(i);
+  const deliveries = await db(`webhook_deliveries?task_id=eq.${id}&select=event_type`);
+  assert.ok(deliveries.some((d) => d.event_type === "task.created"), JSON.stringify(deliveries));
+  await db(`webhooks?team_id=eq.${team.id}`, { method: "DELETE" });
+});
+
 // ---------- Out ----------
 
 test("starting moves the issue to the first started status, once and not backwards", async () => {
@@ -215,17 +408,45 @@ test("starting moves the issue to the first started status, once and not backwar
   assert.equal(i.state, "merge");
 });
 
-test("the agent's comments and progress are posted; the owner's and reviewers' aren't", async () => {
+test("the agent's comments are posted; the owner's, their Claude sessions', reviewers' and logs aren't", async () => {
   const i = issue();
   await poll();
   const { id } = await taskOf(i);
   await db("task_comments", { method: "POST", body: [{ task_id: id, author: "agent", body: "Found the cause" }] });
   await db("task_events", { method: "POST", body: { task_id: id, kind: "agent_log", body: "Reproduced it", actor: "claude" } });
   await db("task_comments", { method: "POST", body: [{ task_id: id, author: "me", body: "private" }] });
+  await db("task_comments", { method: "POST", body: [{ task_id: id, author: "claude", body: "planning note about a blocker" }] });
   await db("task_comments", { method: "POST", body: [{ task_id: id, author: "reviewer", author_name: "Rev", body: "private too" }] });
   await db("task_events", { method: "POST", body: { task_id: id, kind: "note", body: "/Users/x/worktree", actor: "runner" } });
   await drain();
-  assert.deepEqual(bodies(i), ["Found the cause", "Reproduced it"]);
+  assert.deepEqual(bodies(i), ["Found the cause"]);
+});
+
+test("progress logs are posted only for a team that turns them on, and the milestones either way", async () => {
+  const i = issue();
+  await poll();
+  const { id } = await taskOf(i);
+  const url = "https://github.com/acme/app/pull/11";
+  await db("task_events", { method: "POST", body: { task_id: id, kind: "agent_log", body: "quiet", actor: "claude" } });
+  await patch(id, { status: "in_progress" });
+  await patch(id, { links: [{ title: "PR", url }] });
+  await patch(id, { status: "needs_you", question: "Which?" });
+  await patch(id, { status: "done" });
+  await drain();
+  assert.equal(i.state, "review");
+  assert.equal(i.delegate, null);
+  const posted = bodies(i);
+  assert.equal(posted.length, 3);
+  assert.equal(posted[0], `Pull request opened: ${url}`);
+  assert.match(posted[1], /Waiting on Pat/);
+  assert.match(posted[2], /has finished/);
+
+  await db(`teams?id=eq.${team.id}`, { method: "PATCH", body: { linear_post_progress: true } });
+  const loud = issue();
+  await poll();
+  await db("task_events", { method: "POST", body: { task_id: (await taskOf(loud)).id, kind: "agent_log", body: "Reproduced it", actor: "claude" } });
+  await drain();
+  assert.deepEqual(bodies(loud), ["Reproduced it"]);
 });
 
 test("a question reaches the inbox and the issue, once", async () => {
@@ -317,7 +538,7 @@ test("delegating again reopens the same task", async () => {
   await poll();
   assert.equal((await taskOf(i)).status, "done"); // not delegated: stays finished
 
-  i.delegate = VIEWER;
+  delegate(i);
   await poll();
   await poll();
   assert.equal(await countOf(i), 1);
@@ -338,7 +559,7 @@ test("a hand-back to the owner says so and frees the issue; delegating again ret
   await poll();
   assert.equal((await taskOf(i)).status, "ready"); // left with the owner, not cancelled as undelegated
 
-  i.delegate = VIEWER;
+  delegate(i);
   await poll();
   assert.equal((await taskOf(i)).kind, "agent");
 });
@@ -439,7 +660,7 @@ test("assigned issues show up only when turned on, as a human task on Today that
   assert.equal((await taskOf(i)).status, "done");
   await patch(t.id, { status: "ready" });
 
-  i.delegate = VIEWER; // delegating it turns the view into the real thing, still one task
+  delegate(i); // delegating it turns the view into the real thing, still one task
   await poll();
   assert.equal(await countOf(i), 1);
   const real = await taskOf(i);

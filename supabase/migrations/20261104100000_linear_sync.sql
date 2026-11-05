@@ -1,4 +1,4 @@
--- Linear issues delegated to Control Center become ready agent tasks; what happens to them goes back to
+-- Linear issues delegated to Control Center become agent tasks; what happens to them goes back to
 -- Linear. The runner does the talking (runner/linear.mjs). Everything here is so that it stays one task
 -- per issue however many runners poll, and so that every client's changes get reported, not just the
 -- runner's: triggers write to an outbox and the runner posts from it.
@@ -7,7 +7,9 @@ alter table teams
   add column linear_teams text[] not null default '{}',  -- Linear team keys that belong to this team, e.g. {ENG}
   add column linear_review_state text,  -- status for an open PR; empty means a started status with "review" in its name
   add column linear_done_state text,    -- status for finished work; empty means never move it to done
-  add column linear_assignee text;      -- email: also show that person's issues as read-only tasks; empty means off
+  add column linear_assignee text,      -- email: also show that person's issues as read-only tasks; empty means off
+  add column linear_approvers text[] not null default '{}',  -- emails whose delegations start work; anyone else's wait as new
+  add column linear_post_progress boolean not null default false;  -- also post update_task logs to the issue
 
 -- external_ref.id is the human identifier, which changes if the issue moves to another Linear team, so
 -- the issue's own id is what makes it one task per issue.
@@ -73,7 +75,8 @@ end $$;
 create trigger tasks_linear_outbox after update of status, kind, links on tasks
   for each row execute function linear_enqueue_task();
 
--- The agent's own words only. Comments from the owner and from reviewers stay on the board.
+-- The agent's own words only. Comments from the owner, reviewers and the owner's own Claude sessions
+-- (author 'claude', often planning notes) stay on the board.
 create function linear_enqueue_comment() returns trigger language plpgsql as $$
 declare
   t tasks;
@@ -91,14 +94,15 @@ begin
 end $$;
 
 create trigger task_comments_linear_outbox after insert on task_comments
-  for each row when (new.author in ('agent', 'claude')) execute function linear_enqueue_comment();
+  for each row when (new.author = 'agent') execute function linear_enqueue_comment();
 
+-- Every log line is too chatty for an issue clients read, so a team opts in.
 create function linear_enqueue_progress() returns trigger language plpgsql as $$
 declare
   t tasks;
 begin
   select * into t from tasks where id = new.task_id;
-  if linear_reported(t) then
+  if linear_reported(t) and exists (select 1 from teams where id = t.team_id and linear_post_progress) then
     insert into linear_outbox (task_id, kind, body) values (new.task_id, 'comment', new.body);
   end if;
   return new;
@@ -124,10 +128,19 @@ create function linear_outbox_claim(p_limit int default 20) returns setof linear
   returning o.*
 $$;
 
+-- A ready agent task starts by itself, so only an approver's delegation may make one. Anyone else's waits
+-- as new, and this is how the owner hears about it.
+create function linear_ask_approval(p_task bigint, p_issue jsonb, p_delegated_by text) returns void language sql as $$
+  insert into notifications (task_id, kind, body)
+    values (p_task, 'handoff', format('%s delegated %s in Linear. It starts once you approve it: %s',
+      coalesce(p_delegated_by, 'Someone'), p_issue ->> 'id', p_issue ->> 'title'))
+$$;
+
 -- Create or refresh the task for one issue, in one transaction. p_issue: {linear_id, id, url, title,
 -- description, priority, due, labels, project, requested_by}. p_mirror = the read-only view of someone's
--- assigned issues: a human task on Today that reports nothing back.
-create function linear_upsert_issue(p_team bigint, p_issue jsonb, p_mirror boolean default false)
+-- assigned issues: a human task on Today that reports nothing back. p_approved = an approver made this
+-- delegation, so the work can start; the default is that it can't.
+create function linear_upsert_issue(p_team bigint, p_issue jsonb, p_mirror boolean default false, p_approved boolean default false, p_delegated_by text default null)
 returns jsonb language plpgsql as $$
 declare
   t tasks;
@@ -158,7 +171,7 @@ begin
         p_issue ->> 'title',
         p_issue ->> 'description',
         case when p_mirror then 'human' else 'agent' end::task_kind,
-        'ready',
+        case when p_mirror or p_approved then 'ready' else 'new' end::task_status,
         coalesce((p_issue ->> 'priority')::int, 0),
         coalesce((select array_agg(l) from jsonb_array_elements_text(p_issue -> 'labels') l), '{}'),
         (p_issue ->> 'due')::date,
@@ -174,7 +187,10 @@ begin
       return jsonb_build_object('action', 'none');  -- another runner got there first
     end;
     insert into task_events (task_id, kind, body, actor)
-      values (t.id, 'note', format('%s from Linear %s', case when p_mirror then 'assigned' else 'delegated' end, p_issue ->> 'id'), 'runner');
+      values (t.id, 'note', format('%s from Linear %s%s', case when p_mirror then 'assigned' else 'delegated' end, p_issue ->> 'id', ' by ' || p_delegated_by), 'runner');
+    if not p_mirror and not p_approved then
+      perform linear_ask_approval(t.id, p_issue, p_delegated_by);
+    end if;
     return jsonb_build_object('action', 'created', 'task', t.id);
   end if;
 
@@ -218,20 +234,24 @@ begin
   -- Delegated again. Without a worktree to go back to, a resumed session has nothing to stand on.
   update tasks set
     kind = 'agent',
-    status = 'ready',
+    status = case when p_approved then 'ready' else 'new' end::task_status,
     today = false,
     question = null,
     session_id = case when worktree is null then null else session_id end
   where id = t.id;
   insert into task_events (task_id, kind, body, actor)
-    values (t.id, 'status', format('ready: delegated again in Linear (%s)', p_issue ->> 'id'), 'runner');
+    values (t.id, 'status', format('%s: delegated again in Linear (%s%s)', case when p_approved then 'ready' else 'new' end, p_issue ->> 'id', ', by ' || p_delegated_by), 'runner');
+  if not p_approved then
+    perform linear_ask_approval(t.id, p_issue, p_delegated_by);
+  end if;
   return jsonb_build_object('action', 'reopened', 'task', t.id);
 end $$;
 
 -- Same reasoning as the inbound functions: PostgREST exposes new functions, and only the runner's
 -- service key should reach these.
 revoke all on function linear_outbox_claim(int) from public, anon, authenticated;
-revoke all on function linear_upsert_issue(bigint, jsonb, boolean) from public, anon, authenticated;
+revoke all on function linear_upsert_issue(bigint, jsonb, boolean, boolean, text) from public, anon, authenticated;
+revoke all on function linear_ask_approval(bigint, jsonb, text) from public, anon, authenticated;
 revoke all on function linear_reported(tasks) from public, anon, authenticated;
 grant execute on function linear_outbox_claim(int) to service_role;
-grant execute on function linear_upsert_issue(bigint, jsonb, boolean) to service_role;
+grant execute on function linear_upsert_issue(bigint, jsonb, boolean, boolean, text) to service_role;
