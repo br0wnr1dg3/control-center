@@ -262,16 +262,28 @@ export async function pollIssues(db, log = () => {}) {
 
 const STARTED = "started";
 
-// The state to move to, or null to leave the issue where it is. Linear's own rule for agents: the first
-// started status on starting work, unless it's already started or closed, and triage is left to a human.
+// The state to move to, or null to leave the issue where it is. Linear's own rule for agents: a started
+// status on starting work, unless it's already started or closed, and triage is left to a human.
 export function targetState(kind, issue, settings) {
   const states = issue.team.states.nodes;
   const current = issue.state;
   const closed = current.type === "completed" || current.type === "canceled";
   const byPosition = (a, b) => a.position - b.position;
+  // The status work starts in: the team's setting, else one named In Progress, else the first started
+  // status that isn't a blocked or waiting one, which some teams order first.
+  const startState = () => {
+    const wanted = settings?.linear_started_state?.trim().toLowerCase();
+    if (wanted) return states.find((s) => s.name.toLowerCase() === wanted) ?? null;
+    const started = states.filter((s) => s.type === STARTED).sort(byPosition);
+    return (
+      started.find((s) => /^in progress$/i.test(s.name.trim())) ??
+      started.find((s) => !/\b(block|wait|hold|paus)/i.test(s.name)) ??
+      null
+    );
+  };
   if (kind === "started") {
     if (current.type !== "backlog" && current.type !== "unstarted") return null;
-    return states.filter((s) => s.type === STARTED).sort(byPosition)[0] ?? null;
+    return startState();
   }
   if (kind === "pr") {
     if (closed) return null;
@@ -280,8 +292,10 @@ export function targetState(kind, issue, settings) {
       ? states.find((s) => s.name.toLowerCase() === wanted)
       : states.filter((s) => s.type === STARTED && /\breview\b/i.test(s.name)).sort(byPosition)[0];
     if (!target || target.id === current.id) return null;
-    // Never backwards, say from Ready to Merge to In Review.
-    if (current.type === STARTED && target.type === STARTED && current.position >= target.position) return null;
+    // Never backwards, say from Ready to Merge to In Review. Leaving the status work started in is always
+    // forwards, however the team has ordered its statuses.
+    const fromStart = current.id === startState()?.id;
+    if (!fromStart && current.type === STARTED && target.type === STARTED && current.position >= target.position) return null;
     return target;
   }
   if (kind === "done") {
@@ -324,7 +338,7 @@ export function commentFor(row, owner, summary = null) {
 // again on the retry.
 async function deliver(db, row, owner) {
   const [task] = await db(
-    `tasks?id=eq.${row.task_id}&select=external_ref,team:teams(linear_review_state,linear_done_state)`,
+    `tasks?id=eq.${row.task_id}&select=external_ref,team:teams(linear_started_state,linear_review_state,linear_done_state)`,
   );
   const issueId = task.external_ref.linear_id;
   const { viewer, issue } = await linear(ISSUE_QUERY, { id: issueId });

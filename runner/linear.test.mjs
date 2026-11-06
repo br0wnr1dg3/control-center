@@ -673,7 +673,40 @@ test("assigned issues show up only when turned on, as a human task on Today that
   assert.deepEqual(bodies(i), ["on it"]);
 });
 
+test("a task that didn't come from Linear queues nothing for it", async () => {
+  const [t] = await db("tasks", { method: "POST", body: { title: "Not from Linear", kind: "agent", status: "ready", team_id: team.id } });
+  await patch(t.id, { status: "in_progress" });
+  await patch(t.id, { links: [{ title: "PR", url: "https://github.com/o/r/pull/1" }] });
+  await db("task_comments", { method: "POST", body: [{ task_id: t.id, author: "agent", body: "working" }] });
+  await patch(t.id, { status: "done" });
+  assert.deepEqual(await db(`linear_outbox?task_id=eq.${t.id}&select=id`), []);
+});
+
 // ---------- Pure parts ----------
+
+test("work starts in In Progress, not a Blocked status the team orders first", () => {
+  const issue_ = (current, states) => ({ state: current, team: { states: { nodes: states } } });
+  const blockedFirst = [
+    { id: "todo", name: "Todo", type: "unstarted", position: 0 },
+    { id: "blocked", name: "Blocked", type: "started", position: 1 },
+    { id: "staging", name: "Staging", type: "started", position: 2 },
+    { id: "review", name: "Code Review", type: "started", position: 3 },
+    { id: "doing", name: "In Progress", type: "started", position: 4 },
+    { id: "deploy", name: "Ready for Deploy", type: "started", position: 5 },
+  ];
+  const todo = blockedFirst[0];
+  const doing = blockedFirst[4];
+  assert.equal(linear.targetState("started", issue_(todo, blockedFirst), {}).id, "doing");
+  // Without one named In Progress, the first that isn't blocked or waiting.
+  const noInProgress = blockedFirst.filter((s) => s.id !== "doing");
+  assert.equal(linear.targetState("started", issue_(todo, noInProgress), {}).id, "staging");
+  // The team's setting wins.
+  assert.equal(linear.targetState("started", issue_(todo, blockedFirst), { linear_started_state: "staging" }).id, "staging");
+  // From the start status to review is forwards, even when review is ordered before it.
+  assert.equal(linear.targetState("pr", issue_(doing, blockedFirst), { linear_review_state: "Code Review" }).id, "review");
+  // But never back from a later status.
+  assert.equal(linear.targetState("pr", issue_(blockedFirst[5], blockedFirst), { linear_review_state: "Code Review" }), null);
+});
 
 test("a Linear key set on two teams goes to the first", () => {
   const notes = [];
