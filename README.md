@@ -199,7 +199,7 @@ Delegate a Linear issue to the Control Center app and it becomes an agent's task
 
 | On the board | On the Linear issue |
 | --- | --- |
-| Task starts | First `started` status, if it was in backlog or todo. Triage is left to a person |
+| Task starts | The team's started status: its setting, else one named In Progress, else the first `started` status that isn't a blocked or waiting one. Only if it was in backlog or todo; triage is left to a person |
 | Agent's `add_comment` (`author: "agent"`) | Comment |
 | `update_task` log | Comment, only if the team turns on "Also post progress logs to the issue" (off by default: too chatty for an issue clients read) |
 | `needs_you` (still in the inbox too) | Comment, "Waiting on <owner>" |
@@ -235,7 +235,7 @@ security add-generic-password -a control-center -s "control-center linear client
 security add-generic-password -a control-center -s "control-center linear client secret" -w
 ```
 
-Then in the app, under each company's team settings → **Linear**, enter the Linear team keys that belong to it. That's what turns the sync on. Add your Linear email to **Approvers** so your own delegations start by themselves. Optionally set its review and done statuses, and turn on progress logs.
+Then in the app, under each company's team settings → **Linear**, enter the Linear team keys that belong to it. That's what turns the sync on. Add your Linear email to **Approvers** so your own delegations start by themselves. Optionally set its started, review and done statuses (worth it for a team with many started statuses), and turn on progress logs.
 
 To test locally: `CC_SUPABASE_URL=http://127.0.0.1:57721 CC_SERVICE_KEY=<demo key> node --test runner/linear.test.mjs` runs the whole flow against the local database and a fake Linear.
 

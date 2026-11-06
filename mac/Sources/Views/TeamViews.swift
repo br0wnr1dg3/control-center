@@ -112,6 +112,7 @@ struct TeamSettingsView: View {
     @State private var github = ""
     @State private var baseBranch = ""
     @State private var linearTeams = ""
+    @State private var linearStartedState = ""
     @State private var linearReviewState = ""
     @State private var linearDoneState = ""
     @State private var linearAssignee = ""
@@ -192,6 +193,7 @@ struct TeamSettingsView: View {
         github = team.github ?? ""
         baseBranch = team.baseBranch ?? ""
         linearTeams = (team.linearTeams ?? []).joined(separator: ", ")
+        linearStartedState = team.linearStartedState ?? ""
         linearReviewState = team.linearReviewState ?? ""
         linearDoneState = team.linearDoneState ?? ""
         linearAssignee = team.linearAssignee ?? ""
@@ -204,6 +206,9 @@ struct TeamSettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 linearField("Linear teams", "Team keys, e.g. ENG, OPS", $linearTeams, saveLinearTeams)
                 linearField("Approvers", "Linear emails whose delegations start work. Empty: all wait as New", $linearApprovers, saveLinearApprovers)
+                linearField("Started status", "In Progress, or the first started one that isn’t Blocked", $linearStartedState) {
+                    saveLinear("linear_started_state", linearStartedState) { $0.linearStartedState = $1 }
+                }
                 linearField("Review status", "A started status with “review” in its name", $linearReviewState) {
                     saveLinear("linear_review_state", linearReviewState) { $0.linearReviewState = $1 }
                 }
