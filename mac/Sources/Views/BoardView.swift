@@ -55,6 +55,8 @@ struct BoardCard: View {
             HStack(spacing: 6) {
                 Text(task.key).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 Spacer()
+                // It sits in the In progress column, where nothing else says the agent has stopped to wait.
+                if task.isAwaitingReview { StatusPill(task: task) }
                 PriorityIcon(priority: task.priorityLevel)
                 KindIcon(kind: task.kind)
             }

@@ -16,14 +16,24 @@ struct KindIcon: View {
 
 struct StatusPill: View {
     let status: TaskStatus
+    // A started task that has published and is waiting for the decision isn't "in progress" to a person.
+    var awaitingReview = false
+
+    init(status: TaskStatus) { self.status = status }
+    init(task: BoardTask) {
+        status = task.status
+        awaitingReview = task.isAwaitingReview
+    }
+
+    private var color: Color { awaitingReview ? .teal : status.color }
 
     var body: some View {
-        Text(status.label)
+        Text(awaitingReview ? "Awaiting review" : status.label)
             .font(.system(size: 10, weight: .medium))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .background(status.color.opacity(0.15), in: Capsule())
-            .foregroundStyle(status.color)
+            .background(color.opacity(0.15), in: Capsule())
+            .foregroundStyle(color)
             .lineLimit(1)
             .fixedSize()
     }
@@ -198,7 +208,7 @@ struct TaskRow: View {
             }
             if task.isWaiting { WaitingBadge(task: task) }
             if task.kind == .agent || task.status == .new {
-                StatusPill(status: task.status)
+                StatusPill(task: task)
             }
             Text(task.key).font(.caption.monospacedDigit()).foregroundStyle(.tertiary).fixedSize()
         }
