@@ -1,9 +1,12 @@
 #!/usr/bin/env node
 // Publish a file to the Control Center review page and attach the link to the task.
 //
-//   cc-publish <file> [--title "Cut v2 · 9:16"] [--task 52] [--completes-task]
+//   cc-publish <file> [--title "Cut v2 · 9:16"] [--task 52] [--completes-task] [--batch "Monday"]
 //
 // --completes-task: approving this review marks the task done, which frees anything waiting on it.
+// --batch <name>: also adds it to the named review batch for the task's parent (or the task itself, without
+//   one): one link showing every cut published into it as a grid. The batch link goes to stderr, so
+//   stdout stays the review link.
 // Prints the review link. The task defaults to $CC_TASK_ID (set for runner sessions). Videos get a
 // frame-accurate review page; HTML pages and PDFs fill the window; Markdown and text read as a document
 // reviewers can comment on passage by passage; images are shown inline; anything else downloads.
@@ -30,10 +33,11 @@ const completesAt = args.indexOf("--completes-task");
 const completesTask = completesAt >= 0;
 if (completesTask) args.splice(completesAt, 1);
 const title = flag("title");
+const batch = flag("batch");
 const task = flag("task") ?? process.env.CC_TASK_ID;
 const file = args[0];
 if (!file || !task) {
-  console.error("usage: cc-publish <file> [--title <title>] [--task <id>] [--completes-task]   (task defaults to $CC_TASK_ID)");
+  console.error("usage: cc-publish <file> [--title <title>] [--task <id>] [--completes-task] [--batch <name>]   (task defaults to $CC_TASK_ID)");
   process.exit(1);
 }
 
@@ -53,6 +57,7 @@ url.searchParams.set("task", String(task).replace(/^cc-/i, ""));
 url.searchParams.set("filename", basename(file));
 url.searchParams.set("title", title ?? basename(file));
 if (completesTask) url.searchParams.set("completes_task", "1");
+if (batch) url.searchParams.set("batch", batch);
 
 const res = await fetch(url, {
   method: "PUT",
@@ -69,4 +74,6 @@ if (!res.ok) {
   console.error(`publish failed: ${res.status} ${body}`);
   process.exit(1);
 }
-console.log(JSON.parse(body).url);
+const published = JSON.parse(body);
+console.log(published.url);
+if (published.batch_url) console.error(`Batch "${batch}": ${published.batch_url}`);
