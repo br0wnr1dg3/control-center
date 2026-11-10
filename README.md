@@ -245,6 +245,19 @@ Agents share outputs as links, not file paths: `cc-publish <file> --title "Cut v
 
 `cc-publish --completes-task` makes approval the end of the task: approving marks the task `done` and posts the decision, which says so only if that worked. Any approved stage waiting on it then starts. Requesting changes works as usual. The runner types any undelivered comment into a done task's session before asking it to clean up, so the session still sees the decision.
 
+### Batches (`mcp/src/batch.ts`)
+
+A batch is one private link, `/b/<token>`, showing many reviews as a grid, for approving or striking a day's cuts without opening each link. Each tile has the first frame (videos play muted on hover or when selected; images, pages, PDFs and text show as they do on the review page), the title, the task and the current decision. Arrows move, `A` approves, `X` asks for a one-line note and requests changes, `Enter` opens that item's own `/r/<token>` page for frame notes, `U` shows undecided only, `M` turns sound on. The header counts decided against total.
+
+A batch only gathers reviews. The grid posts decisions to each review's own `/r/<token>/decision`, the request the single page makes, so the `reviewer` comment, inbox note, `--completes-task` and `review.decided` webhook are the same from either page, and each page shows what the other decided. Frame notes left on a review's page go out with the next decision, wherever it's made. Anyone with the batch link can open and decide every review in it.
+
+Making one:
+
+- `cc-publish <file> --batch "Monday"` publishes as usual and adds the review to the batch of that name for the task's parent (or the task itself, without one). Sub-tasks publishing into the same name share one link, which is attached to the parent and printed on stderr. A new version of a cut replaces the earlier one in the grid.
+- `POST /api/batches` (Bearer `UPLOAD_TOKEN`) with `{"title": "Monday", "parent": "CC-12"}` gathers every open review on a task and its sub-tasks (the latest version of each); asking again with the same title tops the same batch up. `{"title": …, "label": "dailies", "team": "acme"}` gathers open reviews on that team's tasks carrying a label (`team` is required with `label`; labels are lowercase letters, digits and hyphens), and `{"title": …, "reviews": [<links or tokens>]}` takes exactly those. It answers `{"url", "reviews", "added"}`.
+
+To test locally: `CC_SUPABASE_URL=http://127.0.0.1:57721 CC_SERVICE_KEY=<demo key> CC_UPLOAD_TOKEN=<UPLOAD_TOKEN in .dev.vars> node --test mcp/test/batch.test.mjs`, with `wrangler dev` running. The smoke script covers the same flow when `CC_UPLOAD_TOKEN` is set.
+
 ## Runner (`runner/`)
 
 Polls every 20s. Only tasks with `kind = agent` **and** `status = ready` are started, so moving a task to ready (directly or via `plan_today`) is the approval step.

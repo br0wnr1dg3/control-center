@@ -312,6 +312,36 @@ if (uploadToken) {
   const stays = await call("get_task", { id: dropped.id });
   assert(stays.status === "cancelled" && !/marked done/.test(stays.comments.at(-1).body), "a cancelled task stays cancelled, and the comment doesn't claim otherwise");
   console.log("✓ reviews: completes_task approval → done → next stage free; changes, plain approvals and cancelled tasks don't");
+
+  // Batches: sub-tasks' cuts under one link, decided through each review's own decision.
+  const shoot = await stage("Batch parent");
+  const cutA = await stage("Batch cut A", { parent_id: shoot.id });
+  const cutB = await stage("Batch cut B", { parent_id: shoot.id, ready: true });
+  const viaPublish = await fetch(`${BASE}/api/publish?task=${cutA.id}&filename=smoke.txt&title=Cut%20v1&batch=Smoke%20day`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${uploadToken}`, "content-type": "text/plain" },
+    body: "smoke test",
+  }).then((r) => r.json());
+  assert(/\/b\/([a-z0-9-]+\/)?[\w-]{20,}$/.test(viaPublish.batch_url ?? ""), `publish with batch returns the batch link: ${JSON.stringify(viaPublish)}`);
+  const completingCut = await publish(cutB.id, "&completes_task=1");
+  const batchRequest = (body, auth = uploadToken) =>
+    fetch(`${BASE}/api/batches`, { method: "POST", headers: { authorization: `Bearer ${auth}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+  assert((await batchRequest({ title: "Smoke day", parent: shoot.id }, "wrong")).status === 401, "making a batch needs the upload token");
+  const toppedUp = await (await batchRequest({ title: "Smoke day", parent: `CC-${shoot.id}` })).json();
+  assert(toppedUp.url === viaPublish.batch_url && toppedUp.reviews === 2, `a parent's batch gathers its sub-tasks' open reviews under the same link: ${JSON.stringify(toppedUp)}`);
+  assert((await call("get_task", { id: shoot.id })).links.filter((l) => l.url === toppedUp.url).length === 1, "the batch link is attached to the parent once");
+  const batchPage = await fetch(toppedUp.url.replace(/^https?:\/\/[^/]+/, BASE));
+  assert(batchPage.ok && /Review batch<\/title>/.test(await batchPage.text()), "the batch page opens");
+  const batchToken = toppedUp.url.split("/").pop();
+  const batchItems = async () => (await (await fetch(`${BASE}/b/${batchToken}/data`)).json()).items;
+  const listed = await batchItems();
+  assert(listed.length === 2 && listed.every((i) => i.status === "open") && listed.some((i) => i.token === completingCut && i.completes_task), `batch data lists both cuts: ${JSON.stringify(listed)}`);
+  await decide(completingCut, "approve"); // what the grid's A key sends
+  const afterBatch = await batchItems();
+  assert(afterBatch.find((i) => i.token === completingCut).status === "approved" && afterBatch.filter((i) => i.status === "open").length === 1, "a decision shows in the batch");
+  const cutDone = await call("get_task", { id: cutB.id });
+  assert(cutDone.status === "done" && cutDone.comments.at(-1).author === "reviewer", "approving from a batch completes the task and posts the reviewer comment");
+  console.log("✓ batches: publish into a named batch; parent batch tops up; decisions use the review's own path");
 }
 
 // Inbound events. Without a secret only rejection can be checked, so that part runs anywhere.

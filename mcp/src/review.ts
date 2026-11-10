@@ -1,6 +1,6 @@
 // Reviews: agents publish renders and other outputs to R2 and get a private link to a review page.
 //
-//   PUT  /api/publish?task=<id>&title=<t>&filename=<f>[&completes_task=1]   upload (Bearer UPLOAD_TOKEN), returns the link
+//   PUT  /api/publish?task=<id>&title=<t>&filename=<f>[&completes_task=1][&batch=<name>]   upload (Bearer UPLOAD_TOKEN), returns the link
 //   GET  /r/<team>/<token>                                review page (/r/<token> redirects here)
 //   GET  /r/<token>/file                                  the file (Range requests, for scrubbing)
 //   GET  /r/<token>/data                                  review, task and notes as JSON
@@ -15,9 +15,11 @@
 // which frees whatever was waiting on it (task_dependencies); the runner still delivers the decision to
 // the session before asking it to clean up.
 
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { addToNamedBatch } from "./batch";
+import { database, escapeHtml, json, mayUpload, PAGE_HEADERS, randomToken, reviewPath, teamKey, type ReviewEnv } from "./review-shared";
 
-export type ReviewEnv = Env & { MEDIA: R2Bucket; UPLOAD_TOKEN: string };
+export type { ReviewEnv };
 
 type Review = {
   id: number;
@@ -34,32 +36,11 @@ type Review = {
   created_at: string;
 };
 
-const json = (data: unknown, status = 200) =>
-  new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
-
-const randomToken = () => {
-  const bytes = crypto.getRandomValues(new Uint8Array(24));
-  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-};
-
-const database = (env: ReviewEnv) =>
-  createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
-
 const formatTime = (seconds: number) => {
   const m = Math.floor(seconds / 60);
   const s = (seconds % 60).toFixed(1).padStart(4, "0");
   return `${m}:${s}`;
 };
-
-async function tokenMatches(given: string, expected: string) {
-  if (!expected) return false;
-  const enc = new TextEncoder();
-  const [a, b] = await Promise.all([
-    crypto.subtle.digest("SHA-256", enc.encode(given)),
-    crypto.subtle.digest("SHA-256", enc.encode(expected)),
-  ]);
-  return crypto.subtle.timingSafeEqual(a, b);
-}
 
 export async function handleReview(request: Request, env: ReviewEnv): Promise<Response | null> {
   const url = new URL(request.url);
@@ -88,19 +69,11 @@ export async function handleReview(request: Request, env: ReviewEnv): Promise<Re
   return new Response("Not found", { status: 404 });
 }
 
-const reviewPath = (team: string | null, token: string) => (team ? `/r/${team}/${token}` : `/r/${token}`);
-
-async function teamKey(db: SupabaseClient, taskId: number): Promise<string | null> {
-  const { data } = await db.from("tasks").select("team:teams(key)").eq("id", taskId).maybeSingle();
-  return (data?.team as { key?: string } | null)?.key ?? null;
-}
-
 // ---------- Publish ----------
 
 async function publish(request: Request, env: ReviewEnv, url: URL) {
   if (request.method !== "PUT") return new Response("Method not allowed", { status: 405 });
-  const auth = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
-  if (!(await tokenMatches(auth, env.UPLOAD_TOKEN))) return new Response("Unauthorized", { status: 401 });
+  if (!(await mayUpload(request, env))) return new Response("Unauthorized", { status: 401 });
 
   const taskId = Number(url.searchParams.get("task"));
   const filename = (url.searchParams.get("filename") ?? "file").replace(/[^\w.\-]+/g, "_").slice(0, 120);
@@ -108,7 +81,7 @@ async function publish(request: Request, env: ReviewEnv, url: URL) {
   if (!Number.isInteger(taskId) || taskId <= 0 || !request.body) return json({ error: "task and a file body are required" }, 400);
 
   const db = database(env);
-  const { data: task } = await db.from("tasks").select("id,links").eq("id", taskId).maybeSingle();
+  const { data: task } = await db.from("tasks").select("id,parent_id,team_id").eq("id", taskId).maybeSingle();
   if (!task) return json({ error: `CC-${taskId} not found` }, 404);
 
   const token = randomToken();
@@ -132,9 +105,14 @@ async function publish(request: Request, env: ReviewEnv, url: URL) {
   if (error) return json({ error: error.message }, 500);
 
   const link = `${env.PUBLIC_URL}${reviewPath(await teamKey(db, taskId), token)}`;
-  await db.from("tasks").update({ links: [...(task.links ?? []), { title, url: link }] }).eq("id", taskId);
+  await db.rpc("append_task_link", { p_task: taskId, p_title: title, p_url: link });
   await db.from("task_events").insert({ task_id: taskId, kind: "agent_log", body: `published ${title} for review`, actor: "agent" });
-  return json({ url: link, review_id: review.id, size: stored.size });
+
+  // --batch: the review also joins the named batch for the task's parent, so a day's cuts share one link.
+  const batchName = url.searchParams.get("batch")?.trim().slice(0, 200);
+  const batch = batchName ? await addToNamedBatch(db, env, task, review, batchName) : null;
+  if (batch && "error" in batch) return json({ error: `Published at ${link}, but not added to the batch: ${batch.error}`, url: link }, 500);
+  return json({ url: link, review_id: review.id, size: stored.size, ...(batch ? { batch_url: batch.url } : {}) });
 }
 
 // ---------- Files ----------
@@ -318,12 +296,10 @@ const clip = (text: string) => {
 
 // ---------- Page ----------
 
-const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
-
 function page(review: Review) {
   return new Response(
     REVIEW_PAGE.replaceAll("__TITLE__", escapeHtml(review.title)).replaceAll("__TOKEN__", review.token),
-    { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" } },
+    { headers: PAGE_HEADERS },
   );
 }
 
