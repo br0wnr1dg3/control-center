@@ -120,18 +120,43 @@ test("a batch for a label gathers open reviews on tasks carrying it", async () =
   await publish(two.id, "Two");
   await publish(other.id, "Three");
 
-  const batch = await madeBatch({ title: "Dailies", label });
+  const batch = await madeBatch({ title: "Dailies", label, team: team.key });
   assert.deepEqual(titles(await batchData(batch.token)).sort(), ["One", "Two"]);
-  assert.ok(batch.url.includes(`/b/${team.key}/`), "reviews from one team make it that team's batch");
+  assert.ok(batch.url.includes(`/b/${team.key}/`));
   assert.deepEqual((await task(one.id)).links.filter((l) => /batch/i.test(l.title)), [], "no task owns a label batch");
   // Label batches aren't named: the same title again is a new link.
   assert.notEqual((await madeBatch({ title: "Dailies", label, team: team.key })).url, batch.url);
 
-  assert.equal((await makeBatch({ title: "None", label: `nothing-${run}` })).status, 404);
+  assert.equal((await makeBatch({ title: "None", label: `nothing-${run}`, team: team.key })).status, 404);
+
+  // A label alone would gather every team's reviews under one link.
+  const teamless = await makeBatch({ title: "Every team", label });
+  assert.equal(teamless.status, 400);
+  assert.match((await teamless.json()).error, /team is required/);
+  // Another team's tasks with the same label stay out.
+  const otherTeam = ok(await db.from("teams").insert({ key: `batch-other-${run}`, name: "Other" }).select().single());
+  try {
+    const theirs = await addTask("Their cut", { labels: [label], team_id: otherTeam.id });
+    await publish(theirs.id, "Theirs");
+    assert.deepEqual(titles(await batchData((await madeBatch({ title: "Dailies", label, team: team.key })).token)).sort(), ["One", "Two"]);
+    assert.deepEqual(titles(await batchData((await madeBatch({ title: "Dailies", label, team: otherTeam.key })).token)), ["Theirs"]);
+  } finally {
+    await db.from("review_batches").delete().eq("team_id", otherTeam.id);
+    await db.from("tasks").delete().eq("team_id", otherTeam.id);
+    await db.from("teams").delete().eq("id", otherTeam.id);
+  }
+
+  // Labels are slugs: anything else would mean something else inside the array filter.
+  for (const bad of [`${label},video`, `${label}}`, "{video}", "two words", "-leading", "", 7]) {
+    const res = await makeBatch({ title: "Bad label", label: bad, team: team.key });
+    assert.equal(res.status, 400, `label ${JSON.stringify(bad)}`);
+    assert.match((await res.json()).error, /label must be/);
+  }
+  assert.equal((await makeBatch({ title: "Upper case is folded", label: label.toUpperCase(), team: team.key })).status, 200);
   assert.equal((await makeBatch({ title: "Wrong team", label, team: "no-such-team" })).status, 404);
-  assert.equal((await makeBatch({ title: "Dailies", label }, "wrong-token")).status, 401);
-  assert.equal((await makeBatch({ label })).status, 400, "a title is required");
-  assert.equal((await makeBatch({ title: "Two sources", label, parent: one.id })).status, 400);
+  assert.equal((await makeBatch({ title: "Dailies", label, team: team.key }, "wrong-token")).status, 401);
+  assert.equal((await makeBatch({ label, team: team.key })).status, 400, "a title is required");
+  assert.equal((await makeBatch({ title: "Two sources", label, team: team.key, parent: one.id })).status, 400);
   assert.equal((await fetch(`${BASE}/b/${"x".repeat(32)}`)).status, 404);
 });
 
@@ -165,7 +190,22 @@ test("cc-publish --batch puts sub-tasks' cuts in one batch for their parent, eac
   const solo = await addTask("On its own");
   const alone = await publish(solo.id, "Cut", "&batch=Tuesday");
   assert.notEqual(alone.batch_url, first.batch);
-  assert.ok((await task(solo.id)).links.some((l) => l.url === alone.batch_url));
+  assert.deepEqual((await task(solo.id)).links, [{ title: "Cut", url: alone.url }, { title: "Review batch: Tuesday", url: alone.batch_url }], "the review link and the batch link are both on the task");
+});
+
+test("links added to one task at the same moment are all kept", async () => {
+  // Sub-tasks' first publishes into a new batch each read-modify-wrote the parent's links; so did two publishes on one task.
+  const parent = await addTask("Wednesday's videos");
+  const subs = await Promise.all(["A", "B", "C", "D"].map((n) => addTask(`Video ${n}`, { parent_id: parent.id })));
+  const published = await Promise.all([
+    ...subs.map((s) => publish(s.id, "Cut v1", "&batch=Wednesday")),
+    ...["One", "Two", "Three", "Four"].map((t) => publish(parent.id, t, "&batch=Wednesday")),
+  ]);
+  assert.equal(new Set(published.map((p) => p.batch_url)).size, 1, "one batch between them");
+  const links = (await task(parent.id)).links.map((l) => l.url).sort();
+  assert.deepEqual(links, [published[0].batch_url, ...published.slice(4).map((p) => p.url)].sort(), "the batch link once, and each of the parent's own review links");
+  for (const [i, s] of subs.entries()) assert.deepEqual((await task(s.id)).links.map((l) => l.url), [published[i].url]);
+  assert.equal((await batchData(published[0].batch_url.split("/").pop())).items.length, 8);
 });
 
 test("deciding from a batch is the review's own decision: comment, inbox, webhook and completing the task", async () => {

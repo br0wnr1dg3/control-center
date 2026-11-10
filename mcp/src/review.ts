@@ -81,7 +81,7 @@ async function publish(request: Request, env: ReviewEnv, url: URL) {
   if (!Number.isInteger(taskId) || taskId <= 0 || !request.body) return json({ error: "task and a file body are required" }, 400);
 
   const db = database(env);
-  const { data: task } = await db.from("tasks").select("id,links,parent_id,team_id").eq("id", taskId).maybeSingle();
+  const { data: task } = await db.from("tasks").select("id,parent_id,team_id").eq("id", taskId).maybeSingle();
   if (!task) return json({ error: `CC-${taskId} not found` }, 404);
 
   const token = randomToken();
@@ -105,7 +105,7 @@ async function publish(request: Request, env: ReviewEnv, url: URL) {
   if (error) return json({ error: error.message }, 500);
 
   const link = `${env.PUBLIC_URL}${reviewPath(await teamKey(db, taskId), token)}`;
-  await db.from("tasks").update({ links: [...(task.links ?? []), { title, url: link }] }).eq("id", taskId);
+  await db.rpc("append_task_link", { p_task: taskId, p_title: title, p_url: link });
   await db.from("task_events").insert({ task_id: taskId, kind: "agent_log", body: `published ${title} for review`, actor: "agent" });
 
   // --batch: the review also joins the named batch for the task's parent, so a day's cuts share one link.

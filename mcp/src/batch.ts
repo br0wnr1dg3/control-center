@@ -3,7 +3,7 @@
 //
 //   POST /api/batches                 make (or top up) a batch (Bearer UPLOAD_TOKEN), returns the link. JSON body:
 //                                       { title, parent: <task> }          every open review on the task and its sub-tasks
-//                                       { title, label[, team: <key>] }    every open review on tasks carrying the label
+//                                       { title, label, team: <key> }      every open review on that team's tasks carrying the label
 //                                       { title, reviews: [<link|token>] } exactly these
 //   PUT  /api/publish?...&batch=<name> publish straight into the named batch for the task's parent (review.ts)
 //   GET  /b/<team>/<token>            the grid (/b/<token> redirects here)
@@ -18,7 +18,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { database, escapeHtml, json, mayUpload, PAGE_HEADERS, randomToken, stem, type ReviewEnv } from "./review-shared";
 
 type Batch = { id: number; token: string; title: string; team_id: number | null; task_id: number | null };
-type BatchTask = { id: number; links: { title: string; url: string }[] | null; parent_id: number | null; team_id: number | null };
+type BatchTask = { id: number; parent_id: number | null; team_id: number | null };
 type Candidate = { id: number; title: string; task_id: number; created_at: string; tasks: { team_id: number | null } };
 
 const CANDIDATE = "id,title,task_id,created_at,tasks!inner(team_id)";
@@ -69,10 +69,8 @@ async function ensureBatch(db: SupabaseClient, env: ReviewEnv, title: string, ta
     .select("id,token,title,team_id,task_id")
     .single<Batch>();
   if (made) {
-    if (task) {
-      const link = { title: `Review batch: ${title}`, url: await batchUrl(db, env, made) };
-      await db.from("tasks").update({ links: [...(task.links ?? []), link] }).eq("id", task.id);
-    }
+    // Appended in the database: the task's review link may have been written a moment ago, by this request or a sibling's.
+    if (task) await db.rpc("append_task_link", { p_task: task.id, p_title: `Review batch: ${title}`, p_url: await batchUrl(db, env, made) });
     return { batch: made };
   }
   // Two sub-tasks publishing into a new batch at once: the other one made it.
@@ -99,7 +97,7 @@ export async function addToNamedBatch(
 ): Promise<{ url: string } | { error: string }> {
   let owner = task;
   if (task.parent_id) {
-    const { data: parent } = await db.from("tasks").select("id,links,parent_id,team_id").eq("id", task.parent_id).maybeSingle<BatchTask>();
+    const { data: parent } = await db.from("tasks").select("id,parent_id,team_id").eq("id", task.parent_id).maybeSingle<BatchTask>();
     if (parent) owner = parent;
   }
   const ensured = await ensureBatch(db, env, name, owner, owner.team_id ?? task.team_id);
@@ -126,6 +124,10 @@ async function create(request: Request, env: ReviewEnv) {
   const label = typeof input.label === "string" ? input.label.trim().toLowerCase() : "";
   const listed = Array.isArray(input.reviews) ? input.reviews.map((r) => String(r).split(/[/?#]/).filter(Boolean).pop() ?? "") : null;
   if (!title) return json({ error: "title is required" }, 400);
+  // Labels go into a PostgREST array filter, where "," and "}" would mean something.
+  if (input.label !== undefined && !/^[a-z0-9][a-z0-9-]*$/.test(label)) return json({ error: "label must be lowercase letters, digits and hyphens" }, 400);
+  // A label alone would gather every team's reviews under one link.
+  if (label && !input.team) return json({ error: "team is required with label" }, 400);
   if ([input.parent !== undefined, Boolean(label), Boolean(listed)].filter(Boolean).length !== 1) {
     return json({ error: "give one of parent (a task), label or reviews (links or tokens)" }, 400);
   }
@@ -142,7 +144,7 @@ async function create(request: Request, env: ReviewEnv) {
   let found: Candidate[];
   if (input.parent !== undefined) {
     const parentId = taskIdOf(input.parent);
-    const { data: parent } = parentId ? await db.from("tasks").select("id,links,parent_id,team_id").eq("id", parentId).maybeSingle<BatchTask>() : { data: null };
+    const { data: parent } = parentId ? await db.from("tasks").select("id,parent_id,team_id").eq("id", parentId).maybeSingle<BatchTask>() : { data: null };
     if (!parent) return json({ error: `Task ${input.parent} not found` }, 404);
     owner = parent;
     teamId ??= parent.team_id;
@@ -151,9 +153,7 @@ async function create(request: Request, env: ReviewEnv) {
     if (error) return json({ error: error.message }, 500);
     found = latestVersions(data);
   } else if (label) {
-    let query = db.from("reviews").select(CANDIDATE).eq("status", "open").contains("tasks.labels", [label]);
-    if (teamId) query = query.eq("tasks.team_id", teamId);
-    const { data, error } = await query.returns<Candidate[]>();
+    const { data, error } = await db.from("reviews").select(CANDIDATE).eq("status", "open").contains("tasks.labels", [label]).eq("tasks.team_id", teamId!).returns<Candidate[]>();
     if (error) return json({ error: error.message }, 500);
     found = latestVersions(data);
   } else {
@@ -295,6 +295,15 @@ const BATCH_PAGE = String.raw`<!doctype html>
   .ask input { width: 100%; font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--warn); background: var(--bg); color: var(--text); }
   .state:empty, .hint:empty { display: none; }
   #empty { padding: 40px 20px; text-align: center; }
+  #undo { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 3; max-width: calc(100vw - 24px); overflow: hidden;
+          display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg);
+          box-shadow: 0 6px 24px rgba(0, 0, 0, .25); }
+  #undo[hidden] { display: none; }
+  #undo-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  #undo button { flex: none; background: transparent; color: inherit; border-color: currentColor; }
+  #undo-left { position: absolute; left: 0; bottom: 0; height: 3px; width: 100%; background: var(--ok); transform-origin: 0 0; }
+  #undo-left.run { animation: undo-left 5s linear forwards; }
+  @keyframes undo-left { to { transform: scaleX(0); } }
 </style>
 <header>
   <h1>__TITLE__</h1>
@@ -304,16 +313,17 @@ const BATCH_PAGE = String.raw`<!doctype html>
   <label class="muted"><input type="checkbox" id="undecided"> Undecided only</label>
   <span class="muted">as <a href="#" id="who"></a></span>
 </header>
-<p class="keys muted"><kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> move · <kbd>A</kbd> approve · <kbd>X</kbd> request changes · <kbd>Enter</kbd> open for frame notes · <kbd>U</kbd> undecided only · <kbd>M</kbd> sound</p>
+<p class="keys muted"><kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd> or a click selects · <kbd>A</kbd> approve · <kbd>Z</kbd> undo · <kbd>X</kbd> request changes · <kbd>Enter</kbd> open for frame notes · <kbd>U</kbd> undecided only · <kbd>M</kbd> sound</p>
 <main id="grid"></main>
 <p id="empty" class="muted" hidden></p>
+<div id="undo" role="status" hidden><span id="undo-text"></span><button type="button" id="undo-button">Undo</button><span id="undo-left"></span></div>
 <script>
 const base = "/b/__TOKEN__";
 const $ = (id) => document.getElementById(id);
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
                 set: (k, v) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} } };
 const LABEL = { open: "Waiting for review", approved: "Approved", changes_requested: "Changes requested" };
-let items = [], selected = null, asking = null, sound = false, loaded = false;
+let items = [], selected = null, asking = null, sound = false, loaded = false, held = null;
 let undecidedOnly = store.get("cc-batch-undecided") === "1";
 const tiles = new Map();
 
@@ -458,36 +468,86 @@ function select(token, scroll) {
 
 // ---------- Decisions ----------
 
-// The request the review page's Approve and Request changes buttons make, to the same address.
-async function decide(item, decision, message) {
-  const who = name();
-  if (!who || item.busy) return;
-  item.busy = true; item.state = "Sending…"; render();
-  let failure = null, reply = {};
-  try {
-    const res = await fetch("/r/" + item.token + "/decision", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: who, decision, message }) });
-    if (res.ok) reply = await res.json(); else failure = (await res.text()) || String(res.status);
-  } catch (e) { failure = String(e.message || e); }
-  item.busy = false;
-  if (failure) { item.state = "Couldn't send: " + failure; render(); return; }
-  // Next undecided item, looked up before this one drops out of an undecided-only grid.
+// Shows the item as decided and moves on to the next undecided one.
+function settle(item, status, who) {
+  // Looked up before this one drops out of an undecided-only grid.
   const order = shown(), at = order.indexOf(item);
   const next = order.slice(at + 1).concat(order.slice(0, at)).find((i) => i.status === "open" && i !== item);
-  item.status = reply.status; item.decided_by = who; item.notes = 0;
-  item.state = reply.completed_task ? "CC-" + item.task.id + " is done." : "";
+  item.status = status; item.decided_by = who; item.notes = 0; item.state = "";
   if (selected === item.token && next) select(next.token, true);
   else if (selected === item.token && undecidedOnly) { selected = null; render(); }
   else render();
 }
 
-function approve(item) {
-  if (item.status === "approved") { item.state = "Already approved."; render(); return; }
-  if (asking) asking = null;
-  decide(item, "approve", "");
+// The request the review page's Approve and Request changes buttons make, to the same address.
+// keepalive lets it finish when it's sent as the page is being left.
+async function send(item, decision, message, who, before) {
+  item.busy = true; item.state = "Sending…"; render();
+  let failure = null, reply = {};
+  try {
+    const res = await fetch("/r/" + item.token + "/decision", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: who, decision, message }), keepalive: true });
+    if (res.ok) reply = await res.json(); else failure = (await res.text()) || String(res.status);
+  } catch (e) { failure = String(e.message || e); }
+  item.busy = false;
+  if (failure) { Object.assign(item, before, { state: "Couldn't send: " + failure }); render(); return; }
+  item.status = reply.status;
+  item.state = reply.completed_task ? "CC-" + item.task.id + " is done." : "";
+  render();
 }
 
+const was = (item) => ({ status: item.status, decided_by: item.decided_by, notes: item.notes });
+
+function decide(item, decision, message) {
+  const who = name();
+  if (!who || item.busy) return;
+  release();
+  const before = was(item);
+  settle(item, decision === "approve" ? "approved" : "changes_requested", who);
+  send(item, decision, message, who, before);
+}
+
+// ---------- Approve, with a moment to take it back ----------
+
+// One key approves, and an approval can complete a task, so it's held for five seconds first: the
+// tile shows it and the grid moves on, but nothing is sent until the bar runs out. Z takes it back.
+// Only the latest approval is held: the next decision, or leaving the page, sends it.
+function approve(item) {
+  if (item.status === "approved") { item.state = "Already approved."; render(); return; }
+  const who = name();
+  if (!who || item.busy) return;
+  if (asking) asking = null;
+  release();
+  held = { item, who, before: was(item), timer: setTimeout(release, 5000) };
+  settle(item, "approved", who);
+  $("undo-text").textContent = "Approved " + item.title + (item.completes_task ? " (completes CC-" + item.task.id + ")" : "") + " · Z to undo";
+  $("undo").hidden = false;
+  // Restarts the countdown line.
+  const left = $("undo-left"); left.classList.remove("run"); void left.offsetWidth; left.classList.add("run");
+}
+
+function release() {
+  if (!held) return;
+  const h = held;
+  held = null; clearTimeout(h.timer); $("undo").hidden = true;
+  send(h.item, "approve", "", h.who, h.before);
+}
+
+function undo() {
+  if (!held) return;
+  const h = held;
+  held = null; clearTimeout(h.timer); $("undo").hidden = true;
+  Object.assign(h.item, h.before, { state: "" });
+  select(h.item.token, true);
+}
+$("undo-button").onclick = undo;
+// "hidden" as well as pagehide: a phone can drop a background tab without ever saying it's leaving.
+addEventListener("pagehide", release);
+document.addEventListener("visibilitychange", () => { if (document.hidden) release(); });
+
 function ask(item) {
+  // Asking for changes on the approval still being held replaces it.
+  if (item && held && held.item === item) undo();
   asking = item ? item.token : null;
   render();
   if (!item) return;
@@ -501,8 +561,9 @@ function sendChanges(item) {
   if (!message && !item.notes) return;
   if (!name()) return;
   asking = null;
-  tiles.get(item.token).focus({ preventScroll: true });
   decide(item, "changes", message);
+  // Typing in the note doesn't reach the page's keys; give them back to whichever tile is selected now.
+  tiles.get(selected || item.token).focus({ preventScroll: true });
 }
 
 // ---------- Keyboard ----------
@@ -540,6 +601,7 @@ document.addEventListener("keydown", (e) => {
   if (key.startsWith("Arrow")) { e.preventDefault(); move(key); }
   else if (key === "u") setFilter(!undecidedOnly);
   else if (key === "m") { sound = !sound; if (selected) play(selected, true); }
+  else if (key === "z") undo();
   else if (key === "Escape") { if (asking) ask(null); }
   else if (!item || item.busy) return;
   else if (key === "a") approve(item);
@@ -559,14 +621,14 @@ async function load() {
   items = d.items.map((fresh) => {
     const mine = items.find((i) => i.token === fresh.token);
     if (!mine) return fresh;
-    if (mine.busy) return mine;
+    if (mine.busy || (held && held.item === mine)) return mine;
     if (mine.status !== fresh.status) mine.state = "";
     return Object.assign(mine, fresh);
   });
   loaded = true;
   if (selected && !shown().some((i) => i.token === selected)) selected = null;
+  // Nothing is selected until the reviewer picks a tile, so a stray A can't approve the first cut.
   render();
-  if (!selected && shown().length && !document.querySelector(".ask input:focus")) select(shown()[0].token, false);
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
 setInterval(() => { if (!document.hidden && !asking) load(); }, 30000);

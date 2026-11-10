@@ -254,7 +254,7 @@ A batch only gathers reviews. The grid posts decisions to each review's own `/r/
 Making one:
 
 - `cc-publish <file> --batch "Monday"` publishes as usual and adds the review to the batch of that name for the task's parent (or the task itself, without one). Sub-tasks publishing into the same name share one link, which is attached to the parent and printed on stderr. A new version of a cut replaces the earlier one in the grid.
-- `POST /api/batches` (Bearer `UPLOAD_TOKEN`) with `{"title": "Monday", "parent": "CC-12"}` gathers every open review on a task and its sub-tasks (the latest version of each); asking again with the same title tops the same batch up. `{"title": …, "label": "dailies", "team": "acme"}` gathers open reviews on tasks carrying a label (`team` optional), and `{"title": …, "reviews": [<links or tokens>]}` takes exactly those. It answers `{"url", "reviews", "added"}`.
+- `POST /api/batches` (Bearer `UPLOAD_TOKEN`) with `{"title": "Monday", "parent": "CC-12"}` gathers every open review on a task and its sub-tasks (the latest version of each); asking again with the same title tops the same batch up. `{"title": …, "label": "dailies", "team": "acme"}` gathers open reviews on that team's tasks carrying a label (`team` is required with `label`; labels are lowercase letters, digits and hyphens), and `{"title": …, "reviews": [<links or tokens>]}` takes exactly those. It answers `{"url", "reviews", "added"}`.
 
 To test locally: `CC_SUPABASE_URL=http://127.0.0.1:57721 CC_SERVICE_KEY=<demo key> CC_UPLOAD_TOKEN=<UPLOAD_TOKEN in .dev.vars> node --test mcp/test/batch.test.mjs`, with `wrangler dev` running. The smoke script covers the same flow when `CC_UPLOAD_TOKEN` is set.
 
