@@ -473,6 +473,32 @@ if (inboundSecret) {
   assert(!(await call("list_tasks", { view: "open", query: "Loop X" })).length, "not even its stages");
   console.log("✓ inbound: unknown blockers and cycles rejected, atomically");
 
+  // stage.add: one more stage for a job made earlier, built the way job.create builds one.
+  const finish = {
+    id: `evt-add-${run}`,
+    type: "stage.add",
+    job: `main-${run}`,
+    stage: { id: `finish-${run}`, title: "Finish the video", kind: "human", url: "https://example.com/jobs/1/finish", ready: true, blocked_by: [`cut-${run}`] },
+  };
+  const added = await accepted(finish);
+  const finishId = added.tasks[`finish-${run}`];
+  assert(added.duplicate === false && finishId && Object.keys(added.tasks).length === 1, "stage.add returns the new stage's id");
+  const finished = await call("get_task", { id: finishId });
+  assert((await call("get_task", { id: parentId })).subtasks.some((x) => x.id === finishId), "the stage is a sub-task of the job");
+  assert(finished.external_ref.source === "smoke" && finished.external_ref.id === `finish-${run}` && finished.external_ref.url === "https://example.com/jobs/1/finish", "the stage's external_ref");
+  assert(finished.labels[0] === "inbound" && finished.priority === 2 && finished.requested_by.email === "sam@example.com", "an added stage inherits from the job");
+  assert(finished.status === "ready" && finished.waiting_on.join() === String(cutId) && !(await handoffFor(finishId)), "a ready added stage waits on its blocker");
+  assert((await accepted(finish)).duplicate === true && (await call("get_task", { id: parentId })).subtasks.length === 3, "a repeated stage.add does nothing");
+  const addTo = (jobId, stage, id) => post({ id: `evt-add-${id}-${run}`, type: "stage.add", job: jobId, stage: { title: "Added", kind: "human", ...stage } });
+  assert((await addTo(`main-${run}`, { id: `finish-${run}` }, "taken")).status === 409, "a taken stage id is refused");
+  assert((await addTo(`nothing-${run}`, { id: `lost-${run}` }, "nojob")).status === 404, "an unknown job");
+  assert((await addTo(`cut-${run}`, { id: `nested-${run}` }, "stagejob")).status === 404, "a stage isn't a job");
+  assert((await addTo(String(parentId), { id: `byccid-${run}` }, "ccid")).status === 404, "jobs are addressed by external id, not CC id");
+  assert((await addTo(`main-${run}`, { id: `badblock-${run}`, blocked_by: [`zzz-${run}`] }, "badblock")).status === 422, "blockers must be stages of the job");
+  assert((await addTo(`main-${run}`, { id: `nokind-${run}`, title: "" }, "shape")).status === 400, "a stage is checked like job.create's");
+  assert((await call("get_task", { id: parentId })).subtasks.length === 3, "refused stages leave nothing behind");
+  console.log(`✓ inbound: stage.add → CC-${finishId} under its job, inheriting from it; duplicates, taken ids, unknown jobs and blockers refused`);
+
   // Scoping across teams needs a second team and secret.
   if (BASE.includes("localhost")) {
     await call("save_team", { key: "smoke-other", name: "Smoke Other" });
@@ -491,6 +517,11 @@ if (inboundSecret) {
     const unapprovedAgent = await post(job("agentnew", { kind: "agent" }));
     const agentNewId = unapprovedAgent.body.tasks[`agentnew-${run}`];
     assert(!(await call("list_tasks", { view: "agent_ready" })).some((x) => x.id === agentNewId), "an agent job isn't queued unless ready");
+    const reachAdd = await send("smoke-other", inboundSecret, { source: "smoke", id: `evt-add-reach-${run}`, type: "stage.add", job: `main-${run}`, stage: { id: `reach-${run}`, title: "Reach" } });
+    assert(reachAdd.status === 404, "one team's secret can't add stages to another's job");
+    const agentStage = await accepted({ id: `evt-add-agent-${run}`, type: "stage.add", job: `agentnew-${run}`, stage: { id: `agentstage-${run}`, title: "Added agent stage", kind: "agent", ready: true } });
+    const queuedNow = await call("list_tasks", { view: "agent_ready" });
+    assert(queuedNow.some((x) => x.id === agentStage.tasks[`agentstage-${run}`]) && !queuedNow.some((x) => x.id === agentNewId), "a ready agent stage is queued, without approving its job");
     console.log("✓ inbound: scoped to the sender's team and projects; only ready agent tasks are queued");
   }
 }
@@ -597,8 +628,19 @@ if (!cronRuns) {
     await cron();
     const got = at("/inbound-team");
     assert(got.length === 1 && got[0].body.task.external_ref.id === `hook-${run}` && got[0].body.task.requested_by.name === "Sam", "scope=external gets only the external task, with its refs");
+    // A stage added later is announced like any other new task.
+    const stageAdd = await send(inboundTeam, inboundSecret, {
+      id: `evt-hook-add-${run}`, source: "smoke", type: "stage.add", job: `hook-${run}`, stage: { id: `hook-${run}/finish`, title: "External stage", kind: "human" },
+    });
+    assert(stageAdd.status === 200, `inbound stage failed: ${stageAdd.status}`);
+    await cron();
+    const forStage = at("/inbound-team").slice(1);
+    assert(
+      forStage.length === 1 && forStage[0].body.type === "task.created" && forStage[0].body.task.external_ref.id === `hook-${run}/finish` && forStage[0].body.task.parent_id === got[0].body.task.id,
+      "a stage added by stage.add fires task.created",
+    );
     await call("delete_webhook", { id: externalHook.id });
-    console.log("✓ webhooks: scope=external gets tasks from other apps, with external_ref and requested_by");
+    console.log("✓ webhooks: scope=external gets tasks from other apps, with external_ref and requested_by; stage.add fires task.created");
   }
 
   // Reviews. Needs the upload token, as above.
