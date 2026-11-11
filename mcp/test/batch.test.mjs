@@ -72,13 +72,13 @@ after(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("a batch for a parent task gathers the open reviews under it, the latest version of each", async () => {
+test("a batch for a parent task gathers the open reviews under it, the current version of each", async () => {
   const parent = await addTask("Monday's videos");
   const a = await addTask("Video A", { parent_id: parent.id });
   const b = await addTask("Video B", { parent_id: parent.id });
   const elsewhere = await addTask("Not part of it");
   await publish(a.id, "Cut v1");
-  await publish(a.id, "Cut v2 · 9:16");
+  await publish(a.id, "Cut v2");
   const decided = await publish(b.id, "Cut v1");
   assert.equal((await decide(decided.token, "approve")).status, 200);
   await publish(b.id, "Thumbnail");
@@ -88,12 +88,12 @@ test("a batch for a parent task gathers the open reviews under it, the latest ve
   assert.equal(batch.reviews, 2);
   assert.match(batch.url, new RegExp(`/b/${team.key}/[\\w-]{20,}$`), "the link names the parent's team");
   const data = await batchData(batch.token);
-  assert.deepEqual(titles(data).sort(), ["Cut v2 · 9:16", "Thumbnail"]);
+  assert.deepEqual(titles(data).sort(), ["Cut v2", "Thumbnail"]);
   assert.deepEqual(data.batch, { title: "Monday", team: { key: team.key, name: team.name } });
   const item = data.items.find((i) => i.title === "Thumbnail");
   assert.deepEqual({ ...item, token: null }, {
     token: null, title: "Thumbnail", status: "open", decided_by: null, content_type: "text/plain", filename: "cut.txt",
-    completes_task: false, notes: 0, task: { id: b.id, title: "Video B" },
+    completes_task: false, notes: 0, version: 1, versions: 1, task: { id: b.id, title: "Video B" },
   });
   assert.deepEqual((await task(parent.id)).links, [{ title: "Review batch: Monday", url: batch.url }], "the link is attached to the parent");
 
@@ -183,7 +183,7 @@ test("cc-publish --batch puts sub-tasks' cuts in one batch for their parent, eac
 
   const next = await ccPublish("--task", String(a.id), "--title", "Cut v2", "--batch", "Tuesday");
   assert.equal(next.batch, first.batch);
-  assert.deepEqual((await batchData(token)).items.map((i) => `${i.task.title}: ${i.title}`), ["Video B: Cut v1", "Video A: Cut v2"], "v2 replaces v1");
+  assert.deepEqual((await batchData(token)).items.map((i) => `${i.task.title}: ${i.title} (v${i.version} of ${i.versions})`), ["Video B: Cut v1 (v1 of 1)", "Video A: Cut v2 (v2 of 2)"], "v2 replaces v1");
   assert.deepEqual((await task(parent.id)).links.map((l) => l.url), [first.batch], "attached to the parent once");
 
   // A task without a parent keeps its own batch.

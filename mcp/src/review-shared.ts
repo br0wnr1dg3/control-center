@@ -36,9 +36,8 @@ export async function teamKey(db: SupabaseClient, taskId: number): Promise<strin
 
 export const reviewPath = (team: string | null, token: string) => (team ? `/r/${team}/${token}` : `/r/${token}`);
 
-// Versions of one output share a title once "v2…" is dropped ("Cut v2 · 9:16" and "Cut v3" are both "cut").
-// The review page groups versions the same way.
-export const stem = (title: string) => title.replace(/\s*\bv\d+\b.*$/i, "").trim().toLowerCase();
+// A review named by its link or its bare token.
+export const tokenOf = (value: unknown) => String(value ?? "").split(/[/?#]/).filter(Boolean).pop() ?? "";
 
 export const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
