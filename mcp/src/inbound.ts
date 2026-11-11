@@ -41,7 +41,9 @@ const envelope = {
   source: z
     .string()
     .regex(/^[a-z0-9][a-z0-9_-]{0,49}$/)
-    .refine((s) => s !== "agent", "is reserved"), // tasks.source = 'agent' means an agent's hand-off to the owner
+    // tasks.source = 'agent' means an agent's hand-off to the owner; 'linear' is the Linear sync's, whose tasks
+    // carry an external_ref too, so a sender calling itself that could address them as its own jobs.
+    .refine((s) => s !== "agent" && s !== "linear", "is reserved"),
 };
 
 const stageSchema = z.object({ ...taskFields, blocked_by: z.array(externalId).max(100).optional() });

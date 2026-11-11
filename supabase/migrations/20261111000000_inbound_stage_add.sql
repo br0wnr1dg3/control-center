@@ -20,6 +20,11 @@ begin
   if not found then
     raise exception 'No job with id "%" from %', p_event ->> 'job', p_source using errcode = 'CC404';
   end if;
+  -- Cancelling a job on the board stops it: nothing more is added under it, ready or not. A job that
+  -- is done still takes a stage, since finishing is added after the work it follows is approved.
+  if job.status = 'cancelled' then
+    raise exception 'Job "%" was cancelled, so no stage can be added to it', p_event ->> 'job' using errcode = 'CC409';
+  end if;
 
   -- What the job has now, not what it was sent with: the owner may have relabelled or moved it since.
   stage_id := inbound_insert_task(

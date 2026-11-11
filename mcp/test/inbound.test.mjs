@@ -254,6 +254,24 @@ test("a stage blocked by a cancelled stage asks the owner instead of starting", 
   assert.equal((await task(res.tasks[`${job.id}/finish`])).status, "needs_you");
 });
 
+test("a cancelled job takes no more stages, and a done one still does", async () => {
+  const cancelled = await makeJob();
+  ok(await db.from("tasks").update({ status: "cancelled" }).eq("id", cancelled.taskId).select());
+  const refused = await send(add(cancelled.id, { kind: "agent", ready: true }));
+  assert.equal(refused.status, 409);
+  assert.equal(ok(await db.from("tasks").select("id").eq("parent_id", cancelled.taskId)).length, 1);
+
+  const done = await makeJob();
+  ok(await db.from("tasks").update({ status: "done" }).eq("id", done.taskId).select());
+  const res = await accepted(add(done.id, {}));
+  assert.ok(res.tasks[`${done.id}/finish`]);
+});
+
+test("the Linear sync's name can't be used as a source", async () => {
+  const job = await makeJob();
+  assert.equal((await send({ ...add(job.id, {}), source: "linear" })).status, 400);
+});
+
 test("signature, timestamp, size and shape are checked as for job.create", async () => {
   const job = await makeJob();
   const event = add(job.id, { ready: true, kind: "agent" });
