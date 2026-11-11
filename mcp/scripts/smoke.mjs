@@ -295,7 +295,12 @@ if (uploadToken) {
   await decide(plain, "approve");
   assert((await statusOf(reviewed.id)) === "ready", "a plain approval doesn't finish the task");
   const completing = await publish(reviewed.id, "&completes_task=1");
-  assert((await (await fetch(`${BASE}/r/${completing}/data`)).json()).review.completes_task, "review data shows completes_task");
+  const completingData = await (await fetch(`${BASE}/r/${completing}/data`)).json();
+  assert(completingData.review.completes_task, "review data shows completes_task");
+  // Published under the same title on the same task, it's version 2 of the same piece, and version 1 is superseded.
+  assert(completingData.versions.map((v) => `${v.version}${v.current ? "*" : ""}`).join() === "2*,1", `versions chain by title: ${JSON.stringify(completingData.versions)}`);
+  const stale = await fetch(`${BASE}/r/${plain}/decision`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Smoke", decision: "approve" }) });
+  assert(stale.status === 409 && (await stale.json()).superseded, "approving a superseded version has to be confirmed");
   assert((await call("get_task", { id: reviewed.id })).awaiting_review === true, "an undecided latest review shows as awaiting_review");
   await decide(completing, "changes");
   assert((await call("get_task", { id: reviewed.id })).awaiting_review === false, "a decision ends awaiting_review");
@@ -665,6 +670,7 @@ if (!cronRuns) {
     const dec = events.find((e) => e.type === "review.decided");
     assert(pub?.review.url.endsWith(`/r/${teamKey}/${token}`) && !("token" in pub.review) && pub.review.decision === null, `review.published payload: ${JSON.stringify(pub)}`);
     assert(dec?.review.decision === "approved" && dec.review.decided_by === "Smoke" && dec.review.url === pub.review.url, `review.decided payload: ${JSON.stringify(dec)}`);
+    assert(dec.review.version === 1 && dec.review.versions === 1 && dec.review.current === true, `review events say which version: ${JSON.stringify(dec)}`);
     console.log("✓ webhooks: review.published and review.decided carry the review's link and decision");
   }
 

@@ -13,15 +13,18 @@
 // its /r/<token>/decision, the same request the single page makes, so the task comment, inbox note,
 // completes_task and review.decided webhook can't differ between the two pages. Whoever has the batch
 // link can open and decide every review in it, as if they'd been sent each link.
+//
+// A cut with several versions is one card: the grid shows the piece's current version (review.ts),
+// whichever version was added, so a withdrawn or replaced cut can't be approved from here.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { database, escapeHtml, json, mayUpload, PAGE_HEADERS, randomToken, stem, type ReviewEnv } from "./review-shared";
+import { database, escapeHtml, json, mayUpload, PAGE_HEADERS, randomToken, tokenOf, type ReviewEnv } from "./review-shared";
 
 type Batch = { id: number; token: string; title: string; team_id: number | null; task_id: number | null };
 type BatchTask = { id: number; parent_id: number | null; team_id: number | null };
-type Candidate = { id: number; title: string; task_id: number; created_at: string; tasks: { team_id: number | null } };
+type Candidate = { id: number; tasks: { team_id: number | null } };
 
-const CANDIDATE = "id,title,task_id,created_at,tasks!inner(team_id)";
+const CANDIDATE = "id,tasks!inner(team_id)";
 
 export async function handleBatch(request: Request, env: ReviewEnv): Promise<Response | null> {
   const url = new URL(request.url);
@@ -87,12 +90,12 @@ const addItems = (db: SupabaseClient, batchId: number, reviewIds: number[]) =>
     .upsert(reviewIds.map((review_id) => ({ batch_id: batchId, review_id })), { onConflict: "batch_id,review_id", ignoreDuplicates: true });
 
 // Called by publish. The batch belongs to the task's parent (or the task itself, without one), and a new
-// version takes the place of the versions it supersedes, so the grid shows each cut once.
+// version takes the place of the piece's earlier ones, so the grid shows each cut once.
 export async function addToNamedBatch(
   db: SupabaseClient,
   env: ReviewEnv,
   task: BatchTask,
-  review: { id: number; title: string; task_id: number },
+  review: { id: number; piece_id: number },
   name: string,
 ): Promise<{ url: string } | { error: string }> {
   let owner = task;
@@ -105,8 +108,8 @@ export async function addToNamedBatch(
   const { error } = await addItems(db, ensured.batch.id, [review.id]);
   if (error) return { error: error.message };
 
-  const { data: earlier } = await db.from("reviews").select("id,title").eq("task_id", review.task_id).neq("id", review.id);
-  const superseded = (earlier ?? []).filter((r) => stem(r.title) === stem(review.title)).map((r) => r.id);
+  const { data: earlier } = await db.from("reviews").select("id").eq("piece_id", review.piece_id).neq("id", review.id);
+  const superseded = (earlier ?? []).map((r) => r.id);
   if (superseded.length) await db.from("review_batch_items").delete().eq("batch_id", ensured.batch.id).in("review_id", superseded);
   return { url: await batchUrl(db, env, ensured.batch) };
 }
@@ -122,7 +125,7 @@ async function create(request: Request, env: ReviewEnv) {
   const input = (await request.json().catch(() => ({}))) as { title?: string; parent?: unknown; label?: string; team?: string; reviews?: unknown };
   const title = typeof input.title === "string" ? input.title.trim().slice(0, 200) : "";
   const label = typeof input.label === "string" ? input.label.trim().toLowerCase() : "";
-  const listed = Array.isArray(input.reviews) ? input.reviews.map((r) => String(r).split(/[/?#]/).filter(Boolean).pop() ?? "") : null;
+  const listed = Array.isArray(input.reviews) ? input.reviews.map(tokenOf) : null;
   if (!title) return json({ error: "title is required" }, 400);
   // Labels go into a PostgREST array filter, where "," and "}" would mean something.
   if (input.label !== undefined && !/^[a-z0-9][a-z0-9-]*$/.test(label)) return json({ error: "label must be lowercase letters, digits and hyphens" }, 400);
@@ -149,13 +152,13 @@ async function create(request: Request, env: ReviewEnv) {
     owner = parent;
     teamId ??= parent.team_id;
     const { data: family } = await db.from("tasks").select("id").or(`id.eq.${parent.id},parent_id.eq.${parent.id}`);
-    const { data, error } = await db.from("reviews").select(CANDIDATE).eq("status", "open").in("task_id", (family ?? []).map((t) => t.id)).returns<Candidate[]>();
+    const { data, error } = await db.from("reviews").select(CANDIDATE).eq("status", "open").eq("is_current", true).in("task_id", (family ?? []).map((t) => t.id)).returns<Candidate[]>();
     if (error) return json({ error: error.message }, 500);
-    found = latestVersions(data);
+    found = data;
   } else if (label) {
-    const { data, error } = await db.from("reviews").select(CANDIDATE).eq("status", "open").contains("tasks.labels", [label]).eq("tasks.team_id", teamId!).returns<Candidate[]>();
+    const { data, error } = await db.from("reviews").select(CANDIDATE).eq("status", "open").eq("is_current", true).contains("tasks.labels", [label]).eq("tasks.team_id", teamId!).returns<Candidate[]>();
     if (error) return json({ error: error.message }, 500);
-    found = latestVersions(data);
+    found = data;
   } else {
     const tokens = [...new Set(listed)].filter((t) => /^[A-Za-z0-9_-]{20,}$/.test(t));
     const { data, error } = await db.from("reviews").select(CANDIDATE).in("token", tokens).returns<Candidate[]>();
@@ -163,6 +166,8 @@ async function create(request: Request, env: ReviewEnv) {
     if (data.length !== new Set(listed).size) return json({ error: "Some of those reviews don't exist" }, 404);
     found = data;
   }
+  // Only a piece's current version is gathered for a task or a label: where an agent published v2 before
+  // v1 was decided, or withdrew v2, one of them is worth deciding.
   // Nothing to look at isn't worth a link, unless it tops up a batch that already has cuts in it.
   if (!found.length && !owner) return json({ error: "No open reviews match" }, 404);
 
@@ -184,51 +189,60 @@ async function create(request: Request, env: ReviewEnv) {
   return json({ url: await batchUrl(db, env, ensured.batch), batch_id: ensured.batch.id, reviews: count ?? found.length, added: found.length });
 }
 
-// Where an agent published v2 before v1 was decided, only v2 is worth deciding.
-function latestVersions(reviews: Candidate[]) {
-  const latest = new Map<string, Candidate>();
-  for (const r of [...reviews].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id - b.id)) latest.set(`${r.task_id}:${stem(r.title)}`, r);
-  return [...latest.values()];
-}
-
 // ---------- Data ----------
 
-type Item = {
-  added_at: string;
-  review: {
-    id: number;
-    token: string;
-    title: string;
-    status: string;
-    decided_by: string | null;
-    decided_at: string | null;
-    content_type: string | null;
-    object_key: string;
-    completes_task: boolean;
-    task: { id: number; title: string };
-  };
+type BatchReview = {
+  id: number;
+  token: string;
+  title: string;
+  status: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  content_type: string | null;
+  object_key: string;
+  completes_task: boolean;
+  piece_id: number;
+  version: number;
+  is_current: boolean;
+  task: { id: number; title: string };
 };
 
 async function data(db: SupabaseClient, batch: Batch & { team: { key: string; name: string } | null }) {
   const { data: items, error } = await db
     .from("review_batch_items")
-    .select("added_at,review:reviews!inner(id,token,title,status,decided_by,decided_at,content_type,object_key,completes_task,task:tasks!inner(id,title))")
+    .select("review:reviews!inner(piece_id)")
     .eq("batch_id", batch.id)
     .order("added_at")
     .order("review_id")
-    .returns<Item[]>();
+    .returns<{ review: { piece_id: number } }[]>();
   if (error) return json({ error: error.message }, 500);
 
+  // Each item stands for its piece: the card is the piece's current version, once, where the item was added.
+  const pieces = [...new Set(items.map((i) => i.review.piece_id))];
+  const { data: versions, error: versionsError } = pieces.length
+    ? await db
+        .from("reviews")
+        .select("id,token,title,status,decided_by,decided_at,content_type,object_key,completes_task,piece_id,version,is_current,task:tasks!inner(id,title)")
+        .in("piece_id", pieces)
+        .returns<BatchReview[]>()
+    : { data: [] as BatchReview[], error: null };
+  if (versionsError) return json({ error: versionsError.message }, 500);
+  const cards = pieces.flatMap((piece) => {
+    const all = versions.filter((v) => v.piece_id === piece);
+    const current = all.find((v) => v.is_current);
+    return current ? [{ review: current, versions: all.length }] : [];
+  });
+
   // Frame notes left on the single page that haven't gone to the agent yet: the next decision sends them.
-  const { data: notes } = items.length
-    ? await db.from("task_comments").select("review_id,created_at").in("review_id", items.map((i) => i.review.id)).not("delivered_at", "is", null)
+  const { data: notes } = cards.length
+    ? await db.from("task_comments").select("review_id,created_at").in("review_id", cards.map((c) => c.review.id)).not("delivered_at", "is", null)
     : { data: [] };
-  const waiting = (r: Item["review"]) =>
+  const waiting = (r: BatchReview) =>
     (notes ?? []).filter((n) => n.review_id === r.id && (!r.decided_at || new Date(n.created_at) > new Date(r.decided_at))).length;
 
   return json({
     batch: { title: batch.title, team: batch.team },
-    items: items.map(({ review: r }) => ({
+    items: cards.map(({ review: r, versions: count }) => ({
       token: r.token,
       title: r.title,
       status: r.status,
@@ -237,6 +251,9 @@ async function data(db: SupabaseClient, batch: Batch & { team: { key: string; na
       filename: r.object_key.split("/").pop(),
       completes_task: r.completes_task,
       notes: waiting(r),
+      version: r.version,
+      versions: count,
+      piece: r.piece_id,
       task: r.task,
     })),
   });
@@ -285,6 +302,10 @@ const BATCH_PAGE = String.raw`<!doctype html>
   .thumb .file { color: #fff; font-size: 13px; opacity: .8; }
   .meta { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .title { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+  .title .name { flex: 1; min-width: 0; }
+  .ver { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .ver:empty { display: none; }
   .task { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .by { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -294,6 +315,7 @@ const BATCH_PAGE = String.raw`<!doctype html>
   button:disabled { opacity: .5; cursor: default; }
   .ask input { width: 100%; font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--warn); background: var(--bg); color: var(--text); }
   .state:empty, .hint:empty { display: none; }
+  .state.moved { color: var(--warn); }
   #empty { padding: 40px 20px; text-align: center; }
   #undo { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 3; max-width: calc(100vw - 24px); overflow: hidden;
           display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg);
@@ -391,7 +413,7 @@ function fillThumb(thumb, item) {
 function makeTile(item) {
   const el = document.createElement("article");
   el.className = "tile"; el.tabIndex = 0; el.dataset.token = item.token;
-  el.innerHTML = '<div class="thumb"></div><div class="meta"><div class="name"></div><div class="task muted"></div>' +
+  el.innerHTML = '<div class="thumb"></div><div class="meta"><div class="title"><div class="name"></div><span class="ver"></span></div><div class="task muted"></div>' +
     '<div class="row"><span class="badge"></span><span class="by muted"></span></div>' +
     '<div class="row actions"><button class="ok" data-act="approve" title="Approve (A)">Approve</button>' +
     '<button class="warn" data-act="changes" title="Request changes (X)">Changes</button><span class="spacer"></span>' +
@@ -419,7 +441,7 @@ function play(token, on) {
   if (on) v.play().catch(() => {}); else v.pause();
 }
 
-const shown = () => items.filter((i) => !undecidedOnly || i.status === "open" || i.token === asking || i.busy);
+const shown = () => items.filter((i) => !undecidedOnly || i.status === "open" || i.token === asking || i.busy || i.moved);
 
 function render() {
   const visible = shown(), grid = $("grid");
@@ -434,6 +456,9 @@ function render() {
     el.classList.toggle("sel", item.token === selected);
     el.classList.toggle("decided", item.status !== "open");
     q(".name").textContent = item.title; q(".name").title = item.title;
+    // Only a cut with earlier (or withdrawn) versions says which one this is; Enter opens them all.
+    q(".ver").textContent = item.versions > 1 ? "v" + item.version + " of " + item.versions : "";
+    q(".ver").title = item.versions > 1 ? "The current version of " + item.versions + ". Open it to see the others." : "";
     q(".task").textContent = "CC-" + item.task.id + " · " + item.task.title; q(".task").title = item.task.title;
     q(".badge").textContent = LABEL[item.status]; q(".badge").className = "badge " + item.status;
     q(".by").textContent = item.status !== "open" && item.decided_by ? "by " + item.decided_by : "";
@@ -443,6 +468,7 @@ function render() {
     q(".ask input").placeholder = item.notes ? "Message (optional): Enter sends, Esc cancels" : "What should change? Enter sends, Esc cancels";
     for (const b of el.querySelectorAll("button")) b.disabled = Boolean(item.busy);
     q(".state").textContent = item.state || "";
+    q(".state").classList.toggle("moved", Boolean(item.moved));
   });
   const decided = items.filter((i) => i.status !== "open").length;
   $("count").textContent = decided + " of " + items.length + " decided";
@@ -473,7 +499,7 @@ function settle(item, status, who) {
   // Looked up before this one drops out of an undecided-only grid.
   const order = shown(), at = order.indexOf(item);
   const next = order.slice(at + 1).concat(order.slice(0, at)).find((i) => i.status === "open" && i !== item);
-  item.status = status; item.decided_by = who; item.notes = 0; item.state = "";
+  item.status = status; item.decided_by = who; item.notes = 0; item.state = ""; item.moved = false;
   if (selected === item.token && next) select(next.token, true);
   else if (selected === item.token && undecidedOnly) { selected = null; render(); }
   else render();
@@ -487,10 +513,26 @@ async function send(item, decision, message, who, before) {
   try {
     const res = await fetch("/r/" + item.token + "/decision", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: who, decision, message }), keepalive: true });
-    if (res.ok) reply = await res.json(); else failure = (await res.text()) || String(res.status);
+    if (res.ok) reply = await res.json();
+    else { failure = (await res.text()) || String(res.status); try { failure = JSON.parse(failure).error || failure; } catch {} }
   } catch (e) { failure = String(e.message || e); }
   item.busy = false;
-  if (failure) { Object.assign(item, before, { state: "Couldn't send: " + failure }); render(); return; }
+  if (failure) {
+    Object.assign(item, before, { state: "Couldn't send: " + failure }); render();
+    // A refusal usually means the cut changed under this tab (a newer version, or this one withdrawn): show
+    // what's there now. That swaps this card for the piece's current version, taking the message above with
+    // it, so the card that took its place says what happened and stays in view until it's decided.
+    const wasSelected = selected === item.token;
+    await load();
+    const now = items.find((i) => i.piece === item.piece);
+    if (now && now !== item) {
+      now.moved = true;
+      now.state = "Not sent: version " + item.version + " is superseded. This card is now version " + now.version + ", the current one; nothing was decided.";
+      if (wasSelected) selected = now.token;
+      render();
+    }
+    return;
+  }
   item.status = reply.status;
   item.state = reply.completed_task ? "CC-" + item.task.id + " is done." : "";
   render();
@@ -622,7 +664,7 @@ async function load() {
     const mine = items.find((i) => i.token === fresh.token);
     if (!mine) return fresh;
     if (mine.busy || (held && held.item === mine)) return mine;
-    if (mine.status !== fresh.status) mine.state = "";
+    if (mine.status !== fresh.status) { mine.state = ""; mine.moved = false; }
     return Object.assign(mine, fresh);
   });
   loaded = true;

@@ -2,11 +2,19 @@
 // Publish a file to the Control Center review page and attach the link to the task.
 //
 //   cc-publish <file> [--title "Cut v2 · 9:16"] [--task 52] [--completes-task] [--batch "Monday"]
+//                     [--note "what changed"] [--version-of <link|token>]
+//   cc-publish --make-current <link|token>
 //
 // --completes-task: approving this review marks the task done, which frees anything waiting on it.
 // --batch <name>: also adds it to the named review batch for the task's parent (or the task itself, without
 //   one): one link showing every cut published into it as a grid. The batch link goes to stderr, so
 //   stdout stays the review link.
+// Versions: a file published on the same task under the same title, apart from its version number ("Cut v1",
+//   "Cut v2"), is the next version of that piece: the review page stacks them, and earlier ones are superseded.
+// --note <text>: one line on what changed in this version, shown beside it.
+// --version-of <link|token>: make this a version of that review's piece whatever the titles (or tasks) are.
+// --make-current <link|token>: no file; that version becomes the one that counts and the others are
+//   superseded. For a newer cut that was withdrawn.
 // Prints the review link. The task defaults to $CC_TASK_ID (set for runner sessions). Videos get a
 // frame-accurate review page; HTML pages and PDFs fill the window; Markdown and text read as a document
 // reviewers can comment on passage by passage; images are shown inline; anything else downloads.
@@ -34,11 +42,39 @@ const completesTask = completesAt >= 0;
 if (completesTask) args.splice(completesAt, 1);
 const title = flag("title");
 const batch = flag("batch");
+const note = flag("note");
+const versionOf = flag("version-of");
+const makeCurrent = flag("make-current");
 const task = flag("task") ?? process.env.CC_TASK_ID;
 const file = args[0];
-if (!file || !task) {
-  console.error("usage: cc-publish <file> [--title <title>] [--task <id>] [--completes-task] [--batch <name>]   (task defaults to $CC_TASK_ID)");
+if (!makeCurrent && (!file || !task)) {
+  console.error(
+    "usage: cc-publish <file> [--title <title>] [--task <id>] [--completes-task] [--batch <name>] [--note <what changed>] [--version-of <link|token>]   (task defaults to $CC_TASK_ID)\n" +
+      "       cc-publish --make-current <link|token>",
+  );
   process.exit(1);
+}
+
+const base = process.env.CC_PUBLIC_URL ?? "https://control-center-mcp.chrisbrownridge.workers.dev";
+const uploadToken = () =>
+  process.env.CC_UPLOAD_TOKEN ??
+  execFileSync("security", ["find-generic-password", "-a", "control-center", "-s", "control-center upload token", "-w"]).toString().trim();
+
+if (makeCurrent) {
+  const res = await fetch(new URL("/api/reviews/current", base), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${uploadToken()}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ review: makeCurrent }),
+  });
+  const body = await res.text();
+  if (!res.ok) {
+    console.error(`make-current failed: ${res.status} ${body}`);
+    process.exit(1);
+  }
+  const made = JSON.parse(body);
+  console.log(made.url);
+  console.error(`Version ${made.version} of ${made.versions} is now the current one.`);
+  process.exit(0);
 }
 
 const size = statSync(file).size;
@@ -47,10 +83,7 @@ if (size > 100 * 1024 * 1024) {
   process.exit(1);
 }
 
-const base = process.env.CC_PUBLIC_URL ?? "https://control-center-mcp.chrisbrownridge.workers.dev";
-const token =
-  process.env.CC_UPLOAD_TOKEN ??
-  execFileSync("security", ["find-generic-password", "-a", "control-center", "-s", "control-center upload token", "-w"]).toString().trim();
+const token = uploadToken();
 
 const url = new URL("/api/publish", base);
 url.searchParams.set("task", String(task).replace(/^cc-/i, ""));
@@ -58,6 +91,8 @@ url.searchParams.set("filename", basename(file));
 url.searchParams.set("title", title ?? basename(file));
 if (completesTask) url.searchParams.set("completes_task", "1");
 if (batch) url.searchParams.set("batch", batch);
+if (note) url.searchParams.set("note", note);
+if (versionOf) url.searchParams.set("version_of", versionOf);
 
 const res = await fetch(url, {
   method: "PUT",
@@ -76,4 +111,5 @@ if (!res.ok) {
 }
 const published = JSON.parse(body);
 console.log(published.url);
+if (published.version > 1) console.error(`Version ${published.version} of this piece; earlier versions are now superseded.`);
 if (published.batch_url) console.error(`Batch "${batch}": ${published.batch_url}`);

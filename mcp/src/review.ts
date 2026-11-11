@@ -1,6 +1,8 @@
 // Reviews: agents publish renders and other outputs to R2 and get a private link to a review page.
 //
-//   PUT  /api/publish?task=<id>&title=<t>&filename=<f>[&completes_task=1][&batch=<name>]   upload (Bearer UPLOAD_TOKEN), returns the link
+//   PUT  /api/publish?task=<id>&title=<t>&filename=<f>[&completes_task=1][&batch=<name>][&version_of=<link|token>][&note=<what changed>]
+//                                                         upload (Bearer UPLOAD_TOKEN), returns the link
+//   POST /api/reviews/current                             { review: <link|token> } makes that version the current one (Bearer UPLOAD_TOKEN)
 //   GET  /r/<team>/<token>                                review page (/r/<token> redirects here)
 //   GET  /r/<token>/file                                  the file (Range requests, for scrubbing)
 //   GET  /r/<token>/data                                  review, task and notes as JSON
@@ -14,10 +16,15 @@
 // waiting agent gets the whole review at once. With completes_task, approving also marks the task done,
 // which frees whatever was waiting on it (task_dependencies); the runner still delivers the decision to
 // the session before asking it to clean up.
+//
+// Versions: reviews of the same deliverable form a piece (reviews.piece_id, assigned by a trigger when
+// published: version_of if given, else the same task and the same title without its version number).
+// Each version keeps its own link, notes and decision. One is current, the newest unless the publisher
+// says otherwise; the rest are superseded, and approving one of those has to be confirmed.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { addToNamedBatch } from "./batch";
-import { database, escapeHtml, json, mayUpload, PAGE_HEADERS, randomToken, reviewPath, teamKey, type ReviewEnv } from "./review-shared";
+import { database, escapeHtml, json, mayUpload, PAGE_HEADERS, randomToken, reviewPath, teamKey, tokenOf, type ReviewEnv } from "./review-shared";
 
 export type { ReviewEnv };
 
@@ -34,6 +41,10 @@ type Review = {
   decided_by: string | null;
   decided_at: string | null;
   created_at: string;
+  piece_id: number;
+  version: number;
+  note: string | null;
+  is_current: boolean;
 };
 
 const formatTime = (seconds: number) => {
@@ -45,6 +56,7 @@ const formatTime = (seconds: number) => {
 export async function handleReview(request: Request, env: ReviewEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.pathname === "/api/publish") return publish(request, env, url);
+  if (url.pathname === "/api/reviews/current") return makeCurrent(request, env);
 
   // Sub-routes are short words, so a 20+ character second segment can only be the token.
   const match = url.pathname.match(/^\/r\/(?:([a-z0-9][a-z0-9-]*)\/)?([A-Za-z0-9_-]{20,})(\/.*)?$/);
@@ -84,6 +96,16 @@ async function publish(request: Request, env: ReviewEnv, url: URL) {
   const { data: task } = await db.from("tasks").select("id,parent_id,team_id").eq("id", taskId).maybeSingle();
   if (!task) return json({ error: `CC-${taskId} not found` }, 404);
 
+  // Named explicitly, a version joins that review's piece whatever either is called (and whichever task it's on).
+  const note = url.searchParams.get("note")?.trim().slice(0, 500) || null;
+  const versionOf = url.searchParams.get("version_of");
+  let pieceId: number | undefined;
+  if (versionOf) {
+    const { data: earlier } = await db.from("reviews").select("piece_id").eq("token", tokenOf(versionOf)).maybeSingle();
+    if (!earlier) return json({ error: "version_of doesn't name a published review" }, 404);
+    pieceId = earlier.piece_id;
+  }
+
   const token = randomToken();
   const contentType = request.headers.get("Content-Type") ?? "application/octet-stream";
   const key = `tasks/${taskId}/${token}/${filename}`;
@@ -99,6 +121,8 @@ async function publish(request: Request, env: ReviewEnv, url: URL) {
       content_type: contentType,
       size: stored.size,
       completes_task: url.searchParams.get("completes_task") === "1",
+      note,
+      ...(pieceId ? { piece_id: pieceId } : {}),
     })
     .select()
     .single<Review>();
@@ -106,13 +130,37 @@ async function publish(request: Request, env: ReviewEnv, url: URL) {
 
   const link = `${env.PUBLIC_URL}${reviewPath(await teamKey(db, taskId), token)}`;
   await db.rpc("append_task_link", { p_task: taskId, p_title: title, p_url: link });
-  await db.from("task_events").insert({ task_id: taskId, kind: "agent_log", body: `published ${title} for review`, actor: "agent" });
+  await db.from("task_events").insert({ task_id: taskId, kind: "agent_log", body: `published ${title} for review${review.version > 1 ? ` (version ${review.version})` : ""}`, actor: "agent" });
 
   // --batch: the review also joins the named batch for the task's parent, so a day's cuts share one link.
   const batchName = url.searchParams.get("batch")?.trim().slice(0, 200);
   const batch = batchName ? await addToNamedBatch(db, env, task, review, batchName) : null;
   if (batch && "error" in batch) return json({ error: `Published at ${link}, but not added to the batch: ${batch.error}`, url: link }, 500);
-  return json({ url: link, review_id: review.id, size: stored.size, ...(batch ? { batch_url: batch.url } : {}) });
+  return json({ url: link, review_id: review.id, size: stored.size, version: review.version, ...(batch ? { batch_url: batch.url } : {}) });
+}
+
+// For a newer cut that was withdrawn: an older version becomes the one that counts, and the rest are superseded.
+async function makeCurrent(request: Request, env: ReviewEnv) {
+  if (request.method !== "POST") return new Response("Method not allowed", { status: 405 });
+  if (!(await mayUpload(request, env))) return new Response("Unauthorized", { status: 401 });
+  const input = (await request.json().catch(() => ({}))) as { review?: unknown };
+  const db = database(env);
+  const { data: review } = await db.from("reviews").select("*").eq("token", tokenOf(input.review)).maybeSingle<Review>();
+  if (!review) return json({ error: "review (a link or token) doesn't name a published review" }, 404);
+
+  const { count } = await db.from("reviews").select("id", { count: "exact", head: true }).eq("piece_id", review.piece_id);
+  if (!review.is_current) {
+    const { error } = await db.rpc("set_current_review", { p_review: review.id });
+    if (error) return json({ error: error.message }, 500);
+    await db.from("task_events").insert({
+      task_id: review.task_id,
+      kind: "agent_log",
+      body: `made version ${review.version} of ${review.title} the current one; the other ${(count ?? 2) > 2 ? "versions are" : "version is"} superseded`,
+      actor: "agent",
+    });
+  }
+  const link = `${env.PUBLIC_URL}${reviewPath(await teamKey(db, review.task_id), review.token)}`;
+  return json({ url: link, version: review.version, versions: count ?? 1, current: true });
 }
 
 // ---------- Files ----------
@@ -145,8 +193,12 @@ async function serveObject(request: Request, env: ReviewEnv, key: string, conten
 
 // ---------- Notes and decisions ----------
 
+type VersionRow = Pick<Review, "token" | "title" | "status" | "decided_by" | "content_type" | "object_key" | "created_at" | "version" | "note" | "is_current"> & {
+  task: { team: { key: string } | null } | null;
+};
+
 async function data(db: SupabaseClient, review: Review) {
-  const [task, notes, versions] = await Promise.all([
+  const [task, notes, versions, others] = await Promise.all([
     db.from("tasks").select("id,title,status,team:teams(key,name)").eq("id", review.task_id).single(),
     db
       .from("task_comments")
@@ -156,8 +208,17 @@ async function data(db: SupabaseClient, review: Review) {
       .order("timecode", { ascending: true, nullsFirst: true })
       .order("quote_start", { ascending: true, nullsFirst: true })
       .order("created_at"),
-    db.from("reviews").select("token,title,status,created_at").eq("task_id", review.task_id).order("created_at"),
+    db
+      .from("reviews")
+      .select("token,title,status,decided_by,content_type,object_key,created_at,version,note,is_current,task:tasks(team:teams(key))")
+      .eq("piece_id", review.piece_id)
+      .order("version", { ascending: false })
+      .returns<VersionRow[]>(),
+    // What else is on the task: the current version of each other piece.
+    db.from("reviews").select("token,title").eq("task_id", review.task_id).eq("is_current", true).neq("piece_id", review.piece_id).order("created_at"),
   ]);
+  const chain = versions.data ?? [];
+  const newest = chain[0]?.version ?? review.version;
   return json({
     review: {
       title: review.title,
@@ -166,10 +227,30 @@ async function data(db: SupabaseClient, review: Review) {
       filename: review.object_key.split("/").pop(),
       decided_by: review.decided_by,
       completes_task: review.completes_task,
+      token: review.token,
+      version: review.version,
+      note: review.note,
+      current: review.is_current,
+      created_at: review.created_at,
     },
     task: task.data,
     notes: notes.data ?? [],
-    versions: versions.data ?? [],
+    // Newest first. A version can be on another task (version_of), so each carries its own address.
+    versions: chain.map((v) => ({
+      token: v.token,
+      path: reviewPath(v.task?.team?.key ?? null, v.token),
+      title: v.title,
+      version: v.version,
+      note: v.note,
+      status: v.status,
+      decided_by: v.decided_by,
+      current: v.is_current,
+      latest: v.version === newest,
+      content_type: v.content_type,
+      filename: v.object_key.split("/").pop(),
+      created_at: v.created_at,
+    })),
+    others: others.data ?? [],
   });
 }
 
@@ -220,10 +301,25 @@ async function addNote(request: Request, env: ReviewEnv, db: SupabaseClient, rev
 }
 
 async function decide(request: Request, db: SupabaseClient, review: Review) {
-  const input = (await request.json().catch(() => ({}))) as { name?: string; decision?: string; message?: string };
+  const input = (await request.json().catch(() => ({}))) as { name?: string; decision?: string; message?: string; confirm_superseded?: boolean };
   const name = input.name?.trim().slice(0, 60);
   const decision = input.decision === "approve" ? "approved" : input.decision === "changes" ? "changes_requested" : null;
   if (!name || !decision) return json({ error: "name and decision are required" }, 400);
+
+  // Approving a version that isn't the one that counts has to be meant. Checked here, not only on the
+  // page, so a batch grid or an old tab that still thinks this version is current can't do it by accident.
+  let supersededBy: number | null = null;
+  if (!review.is_current) {
+    const { data: current } = await db.from("reviews").select("version").eq("piece_id", review.piece_id).eq("is_current", true).maybeSingle();
+    supersededBy = current?.version ?? null;
+    if (decision === "approved" && input.confirm_superseded !== true) {
+      return json({
+        error: `Version ${review.version} is superseded${supersededBy ? `: version ${supersededBy} is the current one` : ""}. Approving it has to be confirmed.`,
+        superseded: true,
+        current_version: supersededBy,
+      }, 409);
+    }
+  }
 
   // Every note since this version's last decision goes to the agent in one message.
   let notesQuery = db
@@ -243,7 +339,9 @@ async function decide(request: Request, db: SupabaseClient, review: Review) {
       (n.still_url ? ` frame: ${n.still_url}` : ""),
   );
   const message = input.message?.trim();
-  const headline = decision === "approved" ? `Approved "${review.title}"` : `Changes requested on "${review.title}"`;
+  // The agent should know when the decision is about a version that no longer counts.
+  const which = review.is_current ? "" : ` (version ${review.version}, superseded${supersededBy ? ` by version ${supersededBy}` : ""})`;
+  const headline = (decision === "approved" ? `Approved "${review.title}"` : `Changes requested on "${review.title}"`) + which;
   // Done before the comment, which only says so if it worked. Should the runner look in between, it asks
   // the session to clean up first and types the decision on its next poll: the window stays open for that.
   let completed = false;
@@ -394,10 +492,68 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   .who { font-size: 12px; color: var(--muted); }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   a { color: var(--accent); }
+  .controls .spacer { flex: 1; }
+  .controls a { font-size: 13px; }
+  .speed { display: inline-flex; }
+  .speed button { border-radius: 0; margin-left: -1px; padding: 6px 9px; font-variant-numeric: tabular-nums; }
+  .speed button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
+  .speed button:last-child { border-radius: 0 8px 8px 0; }
+  .speed button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); position: relative; }
+  /* Full screen takes the player with its timeline and controls, so notes' markers and frame stepping come along. */
+  #player:fullscreen { background: var(--bg); padding: 12px 16px; display: flex; flex-direction: column; }
+  #player:fullscreen .stage { flex: 1; min-height: 0; align-items: center; }
+  #player:fullscreen video { max-height: 100%; }
+
+  /* A video with several versions: they stack down the left, newest first, and the player swaps between them. */
+  .mark { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; white-space: nowrap; background: var(--line); color: var(--muted); }
+  .mark.latest, .mark.current { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .mark:empty, .badge[hidden] { display: none; }
+  #rail[hidden], #versionBar[hidden], #newer[hidden], #confirm[hidden], .row[hidden] { display: none; }
+  body.chain main { grid-template-columns: 236px minmax(0, 1fr) 340px; max-width: 1640px; }
+  #rail { align-self: start; position: sticky; top: 20px; max-height: calc(100vh - 40px); overflow-y: auto; }
+  #rail h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 8px; padding: 0 8px; }
+  #railList { display: flex; flex-direction: column; gap: 2px; }
+  .ver { display: flex; gap: 10px; padding: 8px; border-radius: 10px; border: 1px solid transparent; color: inherit; text-decoration: none; min-width: 0; }
+  .ver:hover { background: color-mix(in srgb, var(--line) 55%, transparent); }
+  .ver.sel { background: var(--panel); border-color: var(--line); box-shadow: inset 3px 0 0 var(--accent); }
+  .ver .thumb { flex: none; width: 46px; height: 62px; border-radius: 6px; overflow: hidden; background: #000; }
+  .ver .thumb video, .ver .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+  .ver.old:not(.sel) .thumb { opacity: .55; }
+  .ver .about { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+  .ver .vn { display: flex; gap: 6px; align-items: center; font-weight: 600; font-size: 14px; white-space: nowrap; }
+  .ver .vnote { font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vstate { font-size: 12px; color: var(--muted); display: flex; gap: 5px; align-items: center; white-space: nowrap; overflow: hidden; }
+  .vstate::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid var(--muted); }
+  .vstate.approved { color: var(--ok); } .vstate.approved::before { background: var(--ok); border-color: var(--ok); }
+  .vstate.changes_requested { color: var(--warn); } .vstate.changes_requested::before { background: var(--warn); border-color: var(--warn); }
+  #versionBar { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin: 0 0 10px; }
+  #versionBar strong { font-size: 16px; }
+  #versionNote { flex: 1 1 200px; min-width: 0; }
+  #newer, #confirm { border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 9%, var(--panel));
+                     border-radius: 10px; padding: 8px 12px; font-size: 14px; }
+  #newer { margin: 0 0 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  #confirm { margin-top: 8px; }
+  #confirm p { margin: 0 0 8px; }
+  @media (max-width: 1180px) {
+    body.chain main { grid-template-columns: 212px minmax(0, 1fr); }
+    body.chain aside { grid-column: 2; }
+  }
+  @media (max-width: 900px) {
+    body.chain main { grid-template-columns: minmax(0, 1fr); }
+    body.chain aside { grid-column: auto; }
+    /* The rail becomes a strip above the player. */
+    #rail { position: static; max-height: none; overflow: visible; min-width: 0; }
+    #rail h2 { padding: 0; margin-bottom: 4px; }
+    #railList { flex-direction: row; gap: 6px; overflow-x: auto; padding-bottom: 6px; scroll-snap-type: x proximity; }
+    .ver { flex: none; width: 216px; border-color: var(--line); scroll-snap-align: center; }
+    .ver.sel { box-shadow: inset 0 -3px 0 var(--accent); }
+    .ver .thumb { width: 40px; height: 54px; }
+  }
 </style>
 <header>
   <h1 id="title">__TITLE__</h1>
   <span id="status" class="badge"></span>
+  <span id="superseded" class="badge changes_requested" hidden>Superseded</span>
   <span id="task" class="muted"></span>
   <span id="versions" class="muted"></span>
   <span id="others" class="muted"></span>
@@ -406,15 +562,26 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   <button id="toggle" class="small" hidden>Hide notes</button>
 </header>
 <main>
-  <section>
+  <nav id="rail" aria-label="Versions" hidden><h2>Versions</h2><div id="railList"></div></nav>
+  <section id="player">
+    <div id="versionBar" hidden><strong id="versionName"></strong><span class="muted" id="versionDate"></span><span class="mark" id="versionMark"></span><span class="muted" id="versionNote"></span></div>
+    <div id="newer" hidden><span id="newerText"></span><a id="newerOpen" href="#"></a></div>
     <div class="stage" id="stage"></div>
     <div id="videoControls" hidden>
       <div class="track" id="track"><div class="head" id="head"></div></div>
       <div class="controls">
+        <button id="back5" title="Back 5 seconds (←)">−5s</button>
         <button id="back" title="Previous frame (,)">◀ Frame</button>
         <button id="play" title="Play / pause (space)">Play</button>
         <button id="fwd" title="Next frame (.)">Frame ▶</button>
+        <button id="fwd5" title="Forward 5 seconds (→)">+5s</button>
         <span class="time" id="clock">0:00.0</span>
+        <span class="speed" id="speed" role="group" aria-label="Speed"><button data-rate="1">1×</button><button data-rate="1.5">1.5×</button><button data-rate="2">2×</button></span>
+        <button id="full" title="Full screen (F)">Full screen</button>
+        <span class="spacer"></span>
+        <span class="muted" id="versionCount"></span>
+        <button class="small" id="copy">Copy link</button>
+        <a id="download" href="/r/__TOKEN__/file" download>Download</a>
       </div>
     </div>
   </section>
@@ -432,9 +599,13 @@ const REVIEW_PAGE = String.raw`<!doctype html>
     <div class="panel">
       <strong>Decision</strong>
       <textarea id="message" placeholder="Optional message to the agent" style="min-height: 44px; margin-top: 6px"></textarea>
-      <div class="row" style="margin-top: 8px">
+      <div class="row" id="decide" style="margin-top: 8px">
         <button class="warn" id="changes">Request changes</button>
         <button class="ok" id="approve">Approve</button>
+      </div>
+      <div id="confirm" hidden>
+        <p id="confirmText"></p>
+        <div class="row"><button class="ok" id="confirmYes"></button><button id="confirmNo">Cancel</button><a id="confirmOpen" href="#"></a></div>
       </div>
       <p class="muted" id="decisionState"></p>
       <p class="muted" id="decisionHint" hidden>Approving completes this task.</p>
@@ -443,7 +614,9 @@ const REVIEW_PAGE = String.raw`<!doctype html>
 </main>
 <button id="quoteBtn" class="primary small" hidden>Comment</button>
 <script>
-const base = "/r/__TOKEN__";
+// The version on screen. A video's versions swap in place, so this changes without a page load.
+let token = "__TOKEN__", base = "/r/" + token;
+let review = null, chain = [];
 const FPS = 30;
 const $ = (id) => document.getElementById(id);
 const fmt = (s) => Math.floor(s / 60) + ":" + (s % 60).toFixed(1).padStart(4, "0");
@@ -625,8 +798,8 @@ function render() {
     if (!missing) el.querySelector(".quote")?.addEventListener("click", () => focusNote(n.id, true));
     $("notes").appendChild(el);
   }
+  $("track").querySelectorAll(".marker").forEach((m) => m.remove());
   if (video && video.duration) {
-    $("track").querySelectorAll(".marker").forEach((m) => m.remove());
     for (const n of notes) if (n.timecode !== null) {
       const m = document.createElement("div");
       m.className = "marker"; m.style.left = (100 * n.timecode / video.duration) + "%"; m.title = n.body;
@@ -656,6 +829,7 @@ async function add() {
   const res = await fetch(base + "/notes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
   $("add").disabled = false;
   if (!res.ok) { $("addState").textContent = "Couldn't save: " + (await res.text()); return; }
+  if (!res.url.endsWith(base + "/notes")) return; // another version was opened meanwhile; it's saved on its own
   notes.push(await res.json()); notes.sort((a, b) => (a.timecode ?? -1) - (b.timecode ?? -1));
   $("body").value = ""; $("addState").textContent = "";
   setPending(null); render();
@@ -663,12 +837,16 @@ async function add() {
 $("add").onclick = add;
 $("body").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); add(); } });
 
-async function decide(decision) {
+async function decide(decision, confirmed) {
   const who = name(); if (!who) return;
-  for (const b of [$("approve"), $("changes")]) b.disabled = true;
+  const buttons = [$("approve"), $("changes"), $("confirmYes")];
+  for (const b of buttons) b.disabled = true;
   const res = await fetch(base + "/decision", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: who, decision, message: $("message").value }) });
-  for (const b of [$("approve"), $("changes")]) b.disabled = false;
+    body: JSON.stringify({ name: who, decision, message: $("message").value, confirm_superseded: Boolean(confirmed) }) });
+  for (const b of buttons) b.disabled = false;
+  // This version stopped being the current one while the page was open: say so, and ask.
+  if (res.status === 409) { await load(); askSuperseded(); return; }
+  askSuperseded(false);
   if (!res.ok) { $("decisionState").textContent = "Couldn't send: " + (await res.text()); return; }
   $("message").value = "";
   const reply = await res.json();
@@ -676,8 +854,24 @@ async function decide(decision) {
     : reply.completed_task ? "Approved. The task is done." : "Approved. The agent will wrap up.";
   load();
 }
-$("approve").onclick = () => decide("approve");
+
+// Approving a superseded version is asked about here, in the panel, instead of in a browser dialog.
+function askSuperseded(show) {
+  const current = chain.find((v) => v.current);
+  const on = show !== false && review && !review.current;
+  $("confirm").hidden = !on; $("decide").hidden = on;
+  if (!on) return;
+  $("confirmText").textContent = "Version " + review.version + " is superseded" + (current ? ": version " + current.version + " is the current one" : "") + "." +
+    (review.completes_task ? " Approving it completes the task." : "") + " Approve it anyway?";
+  $("confirmYes").textContent = "Approve version " + review.version + " anyway";
+  $("confirmOpen").hidden = !current;
+  if (current) { $("confirmOpen").textContent = "Open version " + current.version; $("confirmOpen").href = current.path; $("confirmOpen").onclick = (e) => openVersion(e, current); }
+}
+// Cancel takes the focus, so Enter or Space straight after Approve doesn't confirm.
+$("approve").onclick = () => { if (review && !review.current) { askSuperseded(); $("confirmNo").focus(); } else decide("approve"); };
 $("changes").onclick = () => decide("changes");
+$("confirmYes").onclick = () => decide("approve", true);
+$("confirmNo").onclick = () => { askSuperseded(false); $("approve").focus(); };
 
 // ---------- Media ----------
 
@@ -689,6 +883,102 @@ function kindOf(type, filename) {
   if (type.startsWith("text/") || type.startsWith("application/json") || /\.(md|markdown|txt)$/i.test(filename || "")) return "text";
   return "download";
 }
+
+const STATE = { open: "Undecided", approved: "Approved", changes_requested: "Changes requested" };
+const markOf = (v) => (!v.current ? ["", "Superseded"] : v.latest ? ["latest", "Latest"] : ["current", "Current"]);
+const day = (iso) => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+
+// ---------- Versions ----------
+
+// Another version of this video: swapped into the player, with its own notes and decision, and the
+// address changes to its link. Anything that isn't a video opens as its own page.
+function openVersion(e, v) {
+  if (e && (e.metaKey || e.ctrlKey || e.shiftKey || e.button)) return; // a new tab is theirs to ask for
+  if (v.token === token) { if (e) e.preventDefault(); return; }
+  if (mode !== "video" || kindOf(v.content_type, v.filename) !== "video") return;
+  if (e) e.preventDefault();
+  history.pushState(null, "", v.path);
+  show(v.token);
+}
+function show(next) {
+  token = next; base = "/r/" + token;
+  notes = []; review = null;
+  video.pause(); video.src = base + "/file";
+  $("download").href = base + "/file";
+  $("message").value = ""; $("decisionState").textContent = ""; $("addState").textContent = "";
+  askSuperseded(false);
+  render(); load();
+}
+addEventListener("popstate", () => {
+  const next = location.pathname.split("/").filter(Boolean).pop();
+  if (next === token) return;
+  if (video && chain.some((v) => v.token === next)) show(next); else location.reload();
+});
+
+function renderVersions() {
+  const stacked = mode === "video" && chain.length > 1;
+  document.body.classList.toggle("chain", stacked);
+  $("rail").hidden = !stacked; $("versionBar").hidden = !stacked;
+  const current = chain.find((v) => v.current);
+  $("superseded").hidden = review.current;
+  $("superseded").title = current ? "Version " + current.version + " is the current one" : "";
+  // Other kinds keep their links in the header.
+  $("versions").innerHTML = stacked || chain.length < 2 ? "" : [...chain].reverse().map((v) =>
+    v.token === token ? "<strong>v" + v.version + "</strong>" : '<a href="' + v.path + '"' + (v.current ? ' title="The current version"' : "") + ">v" + v.version + "</a>").join(" · ");
+  $("versionCount").textContent = stacked ? chain.length + " versions" : "";
+  $("newer").hidden = !stacked || review.current;
+  if (!stacked) return;
+
+  $("versionName").textContent = "Version " + review.version;
+  $("versionDate").textContent = "· " + day(review.created_at);
+  const [cls, label] = markOf(review);
+  $("versionMark").textContent = label; $("versionMark").className = "mark " + cls;
+  $("versionNote").textContent = review.note || ""; $("versionNote").title = review.note || "";
+  if (!review.current && current) {
+    $("newerText").textContent = "This version is superseded. Version " + current.version + (current.latest ? ", the newest," : "") + " is the current one.";
+    $("newerOpen").textContent = "Open version " + current.version; $("newerOpen").href = current.path; $("newerOpen").onclick = (e) => openVersion(e, current);
+  }
+
+  const list = $("railList");
+  for (const el of [...list.children]) if (!chain.some((v) => v.token === el.dataset.token)) el.remove();
+  chain.forEach((v, at) => {
+    let el = [...list.children].find((c) => c.dataset.token === v.token);
+    if (!el) {
+      el = document.createElement("a");
+      el.dataset.token = v.token; el.href = v.path;
+      el.innerHTML = '<span class="thumb"></span><span class="about"><span class="vn"><span class="num"></span><span class="mark"></span></span>' +
+        '<span class="vnote"></span><span class="vstate"></span></span>';
+      // "#t" makes an early frame the poster once the metadata is in, as on the batch grid.
+      if (kindOf(v.content_type, v.filename) === "video") {
+        const t = document.createElement("video");
+        t.muted = true; t.playsInline = true; t.preload = "metadata"; t.tabIndex = -1; t.src = "/r/" + v.token + "/file#t=0.1";
+        el.firstChild.appendChild(t);
+      } else if (kindOf(v.content_type, v.filename) === "image") {
+        el.firstChild.innerHTML = '<img alt="" src="/r/' + v.token + '/file">';
+      }
+      el.onclick = (e) => openVersion(e, v);
+    }
+    if (list.children[at] !== el) list.insertBefore(el, list.children[at] || null);
+    const q = (c) => el.querySelector(c), [mc, ml] = markOf(v), line = v.note || v.title;
+    el.className = "ver" + (v.token === token ? " sel" : "") + (v.current ? "" : " old");
+    if (v.token === token) el.setAttribute("aria-current", "true"); else el.removeAttribute("aria-current");
+    q(".num").textContent = "Version " + v.version;
+    q(".mark").textContent = ml; q(".mark").className = "mark " + mc;
+    q(".vnote").textContent = line; q(".vnote").title = line;
+    q(".vstate").textContent = STATE[v.status] + (v.status !== "open" && v.decided_by ? " · " + v.decided_by : "");
+    q(".vstate").className = "vstate " + v.status;
+  });
+  const sel = list.querySelector(".sel");
+  // In the phone's strip the selected version sits in the middle, so its neighbours show on both sides.
+  if (sel && list.scrollWidth > list.clientWidth) list.scrollLeft = sel.offsetLeft - list.offsetLeft - (list.clientWidth - sel.offsetWidth) / 2;
+}
+
+$("copy").onclick = async () => {
+  const link = location.origin + location.pathname;
+  try { await navigator.clipboard.writeText(link); $("copy").textContent = "Copied"; }
+  catch { $("copy").textContent = "Couldn't copy"; }
+  setTimeout(() => { $("copy").textContent = "Copy link"; }, 1500);
+};
 
 function setupMedia(type, filename) {
   const src = base + "/file";
@@ -711,12 +1001,37 @@ function setupMedia(type, filename) {
     $("play").onclick = () => (video.paused ? video.play() : video.pause());
     const step = (d) => { video.pause(); video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + d / FPS)); };
     $("back").onclick = () => step(-1); $("fwd").onclick = () => step(1);
+    // Unlike a frame step, a jump leaves a playing video playing.
+    const jump = (s) => { video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + s)); };
+    $("back5").onclick = () => jump(-5); $("fwd5").onclick = () => jump(5);
+    // The default rate too: swapping to another version loads a new file, which goes back to the default.
+    const speed = (rate) => {
+      video.defaultPlaybackRate = video.playbackRate = rate;
+      for (const b of $("speed").children) b.setAttribute("aria-pressed", String(Number(b.dataset.rate) === rate));
+    };
+    for (const b of $("speed").children) b.onclick = () => speed(Number(b.dataset.rate));
+    speed(1);
+    // An iPhone only puts the video itself full screen, with its own controls.
+    const player = $("player"), enter = player.requestFullscreen || player.webkitRequestFullscreen;
+    const full = () => {
+      if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      else if (enter) enter.call(player);
+      else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+    };
+    $("full").hidden = !enter && !video.webkitEnterFullscreen;
+    $("full").onclick = full;
+    const fullLabel = () => { $("full").textContent = document.fullscreenElement || document.webkitFullscreenElement ? "Exit full screen" : "Full screen"; };
+    document.addEventListener("fullscreenchange", fullLabel); document.addEventListener("webkitfullscreenchange", fullLabel);
     $("track").onclick = (e) => { const r = $("track").getBoundingClientRect(); video.currentTime = (e.clientX - r.left) / r.width * video.duration; };
     document.addEventListener("keydown", (e) => {
-      if (e.target.tagName === "TEXTAREA") return;
+      if (/^(TEXTAREA|INPUT|SELECT)$/.test(e.target.tagName)) return;
       if (e.key === " ") { e.preventDefault(); video.paused ? video.play() : video.pause(); }
       if (e.key === ",") step(-1);
       if (e.key === ".") step(1);
+      if (e.metaKey || e.ctrlKey || e.altKey) return; // ⌘← is the browser's Back
+      if (e.key === "ArrowLeft") { e.preventDefault(); jump(-5); }
+      if (e.key === "ArrowRight") { e.preventDefault(); jump(5); }
+      if (e.key === "f" || e.key === "F") full();
     });
     $("body").addEventListener("focus", () => video.pause());
   } else if (mode === "image") {
@@ -739,28 +1054,28 @@ function setupMedia(type, filename) {
   }
 }
 
-// Versions are the task's outputs sharing this one's title once "v2…" is dropped; other outputs on
-// the task are listed separately so a page and a post don't number as v1 and v2 of the same thing.
-const stem = (t) => t.replace(/\s*\bv\d+\b.*$/i, "").trim().toLowerCase();
 async function load() {
+  const asked = token;
   const d = await (await fetch(base + "/data")).json();
-  const team = d.task.team, link = (token) => "/r/" + (team ? team.key + "/" : "") + token;
-  $("status").textContent = { open: "Waiting for review", approved: "Approved", changes_requested: "Changes requested" }[d.review.status];
-  $("status").className = "badge " + d.review.status;
-  $("decisionHint").hidden = !d.review.completes_task;
+  if (asked !== token) return; // another version was opened while this was on its way
+  review = d.review; chain = d.versions;
+  const team = d.task.team, link = (t) => "/r/" + (team ? team.key + "/" : "") + t;
+  $("title").textContent = review.title; document.title = review.title + " · Review";
+  $("status").textContent = { open: "Waiting for review", approved: "Approved", changes_requested: "Changes requested" }[review.status];
+  $("status").className = "badge " + review.status;
+  $("decisionHint").hidden = !review.completes_task;
   $("task").textContent = (team ? team.name + " · " : "") + "CC-" + d.task.id + " · " + d.task.title;
-  const mine = stem(d.review.title);
-  const same = d.versions.filter((v) => stem(v.title) === mine);
-  $("versions").innerHTML = same.length > 1 ? same.map((v, i) =>
-    v.token === "__TOKEN__" ? "<strong>v" + (i + 1) + "</strong>" : '<a href="' + link(v.token) + '">v' + (i + 1) + "</a>").join(" · ") : "";
-  const latest = new Map();
-  for (const v of d.versions) if (stem(v.title) !== mine) latest.set(stem(v.title), v);
-  $("others").innerHTML = latest.size ? "Also on this task: " + [...latest.values()].map((v) =>
+  $("others").innerHTML = d.others.length ? "Also on this task: " + d.others.map((v) =>
     '<a href="' + link(v.token) + '">' + esc(v.title) + "</a>").join(" · ") : "";
   notes = d.notes;
-  if (!$("stage").firstChild) setupMedia(d.review.content_type, d.review.filename);
+  if (!$("stage").firstChild) setupMedia(review.content_type, review.filename);
+  $("download").download = review.filename || "";
+  renderVersions();
+  if (!$("confirm").hidden) askSuperseded();
   highlight(); render();
 }
+// A decision made on another version's tab, or from a batch, shows in the rail when this one is looked at again.
+document.addEventListener("visibilitychange", () => { if (!document.hidden && chain.length > 1) load(); });
 showName();
 load();
 </script>
