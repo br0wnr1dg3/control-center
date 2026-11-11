@@ -2,8 +2,8 @@
 -- review page can stack a cut's versions beside the player and say which one counts.
 --
 -- A review joins a piece when it's published: the one named with `cc-publish --version-of`, else the
--- piece of the latest review on the same task whose title is the same once the version number is
--- dropped ("Laundry Day · 9:16 · v1" and "Laundry Day · 9:16 · v2"), else a new one. The rule lives here
+-- piece of the latest review on the same task whose title is the same once a version number standing as
+-- its own word is dropped ("Laundry Day · 9:16 · v1" and "Laundry Day · 9:16 · v2"), else a new one. The rule lives here
 -- so the page, the batch grid and webhooks can't disagree about it. The newest version is the current
 -- one until the publisher makes an older one current (set_current_review); the others are superseded.
 
@@ -15,11 +15,22 @@ alter table reviews
 
 -- Only the version number goes ("v2", "V02"), not what follows it: "Laundry Day v1 · pace gate" and
 -- "Laundry Day v1 · rule check" are two pieces, not two versions of one. Spacing and punctuation don't count.
+--
+-- A version number is only a re-cut marker as a word of its own in a title a person wrote. In a file name
+-- it is part of what the deliverable is: "FLX001_Concept-Name_IT01-V01_1080x1920_AI_EN-US_45sec.mp4" and
+-- "…_IT01-V02_…" are two deliverables (a new hook), and chaining them would mark an approved one
+-- superseded. So nothing is dropped from a title that has no spaces or ends in a file extension, nor a
+-- number joined to its neighbours by "_" or "-". A missed chain costs a `--version-of`; a wrong one hides a cut.
+--
+-- Null when nothing is left to compare ("🎬", "!!"): such a title matches no other, so it starts its own piece.
 create function review_piece_key(p_title text) returns text
 language sql immutable as $$
-  select regexp_replace(
-    regexp_replace(lower(p_title), '(^|[^[:alnum:]])v\d+(?![[:alnum:]])', '\1', 'g'),
-    '[^[:alnum:]]+', '', 'g');
+  select nullif(regexp_replace(
+    case
+      when btrim(p_title) !~ '\s' or btrim(p_title) ~* '\.[a-z][a-z0-9]{1,4}$' then lower(p_title)
+      else regexp_replace(lower(p_title), '(^|[^[:alnum:]_-])v\d+(?![[:alnum:]_-])', '\1', 'g')
+    end,
+    '[^[:alnum:]]+', '', 'g'), '');
 $$;
 
 -- Reviews published before this: grouped by the same rule, in the order they were published.
@@ -27,9 +38,10 @@ with numbered as (
   select id,
          first_value(id) over w as piece,
          row_number() over w as n,
-         count(*) over (partition by task_id, review_piece_key(title)) as total
+         count(*) over w2 as total
     from reviews
-  window w as (partition by task_id, review_piece_key(title) order by created_at, id)
+  window w as (partition by task_id, coalesce(review_piece_key(title), '#' || id) order by created_at, id),
+         w2 as (partition by task_id, coalesce(review_piece_key(title), '#' || id))
 )
 update reviews r
    set piece_id = n.piece, version = n.n, is_current = (n.n = n.total)
@@ -49,6 +61,7 @@ begin
   if new.piece_id is null then
     -- Two versions published on a task at the same moment mustn't both start a piece.
     perform pg_advisory_xact_lock(hashtext('review_piece'), new.task_id::int);
+    -- A null key equals nothing, so a title with nothing to compare never joins another's piece.
     select piece_id into new.piece_id
       from reviews
      where task_id = new.task_id and review_piece_key(title) = review_piece_key(new.title)

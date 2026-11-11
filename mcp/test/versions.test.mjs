@@ -71,11 +71,60 @@ test("the title without its version number names the piece", async () => {
   assert.equal(await key("Laundry Day · 9:16 · v1"), await key("Laundry Day · 9:16 · v2"));
   assert.equal(await key("Cut v2"), await key("cut  V10"));
   assert.equal(await key("Cut"), await key("Cut v3"));
-  assert.equal(await key("FLX000_Laundry-Day_IT01-V01_1080x1920.mp4"), await key("FLX000_Laundry-Day_IT01-V02_1080x1920.mp4"));
+  assert.equal(await key("Cut (v2)"), await key("Cut - v3"));
   // What follows the number still counts: two reports on v1 aren't versions of each other, nor are two sizes.
   assert.notEqual(await key("Laundry Day v1 · pace gate"), await key("Laundry Day v1 · rule check"));
   assert.notEqual(await key("Cut v1 · 9:16"), await key("Cut v1 · 1:1"));
   assert.notEqual(await key("Vivid v2"), await key("Vv2"));
+});
+
+test("a version number inside a file name is part of the deliverable, not a re-cut", async () => {
+  const key = async (title) => ok(await db.rpc("review_piece_key", { p_title: title }));
+  const name = (it, v, size) => `FLX001_Concept-Name_${it}-${v}_${size}_AI_EN-US_45sec.mp4`;
+  // V02 is a new hook and IT02 a new iteration; the finals differ only in their size.
+  const names = [
+    name("IT01", "V01", "1080x1920"), name("IT01", "V02", "1080x1920"), name("IT02", "V01", "1080x1920"),
+    name("IT01", "V01", "1080x1080"), name("IT01", "V01", "1920x1080"),
+  ];
+  assert.equal(names[0], "FLX001_Concept-Name_IT01-V01_1080x1920_AI_EN-US_45sec.mp4");
+  const keys = await Promise.all(names.map(key));
+  assert.equal(new Set(keys).size, names.length, JSON.stringify(keys));
+  // No spaces, a file extension, or a number joined by "_" or "-": nothing is dropped.
+  assert.notEqual(await key("Laundry-Day_v1"), await key("Laundry-Day_v2"));
+  assert.notEqual(await key("Laundry Day v1.mp4"), await key("Laundry Day v2.mp4"));
+  assert.notEqual(await key("Laundry Day IT01-V01 final"), await key("Laundry Day IT01-V02 final"));
+  assert.notEqual(await key("Laundry Day cut_v1"), await key("Laundry Day cut_v2"));
+  // A decimal isn't a file extension.
+  assert.equal(await key("Hook test v1 at 1.5"), await key("Hook test v2 at 1.5"));
+
+  // On a task: an approved V01 isn't superseded by V02, and the same file published again is its next version.
+  const task = await addTask("Deliverables");
+  const v01 = await publish(task.id, names[0]);
+  assert.equal((await decide(v01.token, { decision: "approve" })).status, 200);
+  const published = [];
+  for (const title of names.slice(1)) published.push(await publish(task.id, title));
+  assert.deepEqual(published.map((p) => p.version), [1, 1, 1, 1]);
+  const first = await reviewData(v01.token);
+  assert.deepEqual([rail(first), first.review.status], [[[1, true, true]], "approved"]);
+  const square = await publish(task.id, names[3], `&note=${encodeURIComponent("Logo moved")}`);
+  assert.equal(square.version, 2);
+  assert.deepEqual(rail(await reviewData(published[2].token)), [[2, true, true], [1, false, false]]);
+  assert.deepEqual(rail(await reviewData(published[3].token)), [[1, true, true]], "the 1920x1080 final is its own piece");
+});
+
+test("a title with no letters or digits starts its own piece", async () => {
+  const key = async (title) => ok(await db.rpc("review_piece_key", { p_title: title }));
+  for (const title of ["🎬", "!!", " · "]) assert.equal(await key(title), null, title);
+  assert.equal(await key("v2"), "v2", "a bare version number is the whole title, so it stays");
+  const task = await addTask("Odd titles");
+  const published = [];
+  for (const title of ["🎬", "!!", "🎬", "v2", "v3"]) published.push(await publish(task.id, title));
+  assert.deepEqual(published.map((p) => p.version), [1, 1, 1, 1, 1]);
+  for (const p of published) assert.deepEqual(rail(await reviewData(p.token)), [[1, true, true]]);
+  // Told to, they still chain.
+  const next = await publish(task.id, "🎬", `&version_of=${published[0].token}`);
+  assert.equal(next.version, 2);
+  assert.equal((await publish(task.id, "!!")).version, 1, "and the one after doesn't follow by title");
 });
 
 test("versions published on a task chain by title; each keeps its own link, notes and decision", async () => {
