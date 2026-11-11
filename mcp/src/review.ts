@@ -494,6 +494,15 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   a { color: var(--accent); }
   .controls .spacer { flex: 1; }
   .controls a { font-size: 13px; }
+  .speed { display: inline-flex; }
+  .speed button { border-radius: 0; margin-left: -1px; padding: 6px 9px; font-variant-numeric: tabular-nums; }
+  .speed button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
+  .speed button:last-child { border-radius: 0 8px 8px 0; }
+  .speed button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); position: relative; }
+  /* Full screen takes the player with its timeline and controls, so notes' markers and frame stepping come along. */
+  #player:fullscreen { background: var(--bg); padding: 12px 16px; display: flex; flex-direction: column; }
+  #player:fullscreen .stage { flex: 1; min-height: 0; align-items: center; }
+  #player:fullscreen video { max-height: 100%; }
 
   /* A video with several versions: they stack down the left, newest first, and the player swaps between them. */
   .mark { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; white-space: nowrap; background: var(--line); color: var(--muted); }
@@ -554,17 +563,21 @@ const REVIEW_PAGE = String.raw`<!doctype html>
 </header>
 <main>
   <nav id="rail" aria-label="Versions" hidden><h2>Versions</h2><div id="railList"></div></nav>
-  <section>
+  <section id="player">
     <div id="versionBar" hidden><strong id="versionName"></strong><span class="muted" id="versionDate"></span><span class="mark" id="versionMark"></span><span class="muted" id="versionNote"></span></div>
     <div id="newer" hidden><span id="newerText"></span><a id="newerOpen" href="#"></a></div>
     <div class="stage" id="stage"></div>
     <div id="videoControls" hidden>
       <div class="track" id="track"><div class="head" id="head"></div></div>
       <div class="controls">
+        <button id="back5" title="Back 5 seconds (←)">−5s</button>
         <button id="back" title="Previous frame (,)">◀ Frame</button>
         <button id="play" title="Play / pause (space)">Play</button>
         <button id="fwd" title="Next frame (.)">Frame ▶</button>
+        <button id="fwd5" title="Forward 5 seconds (→)">+5s</button>
         <span class="time" id="clock">0:00.0</span>
+        <span class="speed" id="speed" role="group" aria-label="Speed"><button data-rate="1">1×</button><button data-rate="1.5">1.5×</button><button data-rate="2">2×</button></span>
+        <button id="full" title="Full screen (F)">Full screen</button>
         <span class="spacer"></span>
         <span class="muted" id="versionCount"></span>
         <button class="small" id="copy">Copy link</button>
@@ -988,12 +1001,37 @@ function setupMedia(type, filename) {
     $("play").onclick = () => (video.paused ? video.play() : video.pause());
     const step = (d) => { video.pause(); video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + d / FPS)); };
     $("back").onclick = () => step(-1); $("fwd").onclick = () => step(1);
+    // Unlike a frame step, a jump leaves a playing video playing.
+    const jump = (s) => { video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + s)); };
+    $("back5").onclick = () => jump(-5); $("fwd5").onclick = () => jump(5);
+    // The default rate too: swapping to another version loads a new file, which goes back to the default.
+    const speed = (rate) => {
+      video.defaultPlaybackRate = video.playbackRate = rate;
+      for (const b of $("speed").children) b.setAttribute("aria-pressed", String(Number(b.dataset.rate) === rate));
+    };
+    for (const b of $("speed").children) b.onclick = () => speed(Number(b.dataset.rate));
+    speed(1);
+    // An iPhone only puts the video itself full screen, with its own controls.
+    const player = $("player"), enter = player.requestFullscreen || player.webkitRequestFullscreen;
+    const full = () => {
+      if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      else if (enter) enter.call(player);
+      else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+    };
+    $("full").hidden = !enter && !video.webkitEnterFullscreen;
+    $("full").onclick = full;
+    const fullLabel = () => { $("full").textContent = document.fullscreenElement || document.webkitFullscreenElement ? "Exit full screen" : "Full screen"; };
+    document.addEventListener("fullscreenchange", fullLabel); document.addEventListener("webkitfullscreenchange", fullLabel);
     $("track").onclick = (e) => { const r = $("track").getBoundingClientRect(); video.currentTime = (e.clientX - r.left) / r.width * video.duration; };
     document.addEventListener("keydown", (e) => {
-      if (e.target.tagName === "TEXTAREA") return;
+      if (/^(TEXTAREA|INPUT|SELECT)$/.test(e.target.tagName)) return;
       if (e.key === " ") { e.preventDefault(); video.paused ? video.play() : video.pause(); }
       if (e.key === ",") step(-1);
       if (e.key === ".") step(1);
+      if (e.metaKey || e.ctrlKey || e.altKey) return; // ⌘← is the browser's Back
+      if (e.key === "ArrowLeft") { e.preventDefault(); jump(-5); }
+      if (e.key === "ArrowRight") { e.preventDefault(); jump(5); }
+      if (e.key === "f" || e.key === "F") full();
     });
     $("body").addEventListener("focus", () => video.pause());
   } else if (mode === "image") {
