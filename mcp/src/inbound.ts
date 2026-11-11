@@ -1,4 +1,4 @@
-// Signed inbound events: a trusted app creates job trees and advances stages (POST /hooks/inbound).
+// Signed inbound events: a trusted app creates job trees, adds stages and advances them (POST /hooks/inbound).
 //
 // Each team has its own secret, the Worker secret INBOUND_SECRET_<TEAM KEY> (uppercase, "-" as "_"); a team
 // without one accepts nothing. The sender signs every request:
@@ -41,8 +41,12 @@ const envelope = {
   source: z
     .string()
     .regex(/^[a-z0-9][a-z0-9_-]{0,49}$/)
-    .refine((s) => s !== "agent", "is reserved"), // tasks.source = 'agent' means an agent's hand-off to the owner
+    // tasks.source = 'agent' means an agent's hand-off to the owner; 'linear' is the Linear sync's, whose tasks
+    // carry an external_ref too, so a sender calling itself that could address them as its own jobs.
+    .refine((s) => s !== "agent" && s !== "linear", "is reserved"),
 };
+
+const stageSchema = z.object({ ...taskFields, blocked_by: z.array(externalId).max(100).optional() });
 
 const eventSchema = z.discriminatedUnion("type", [
   z.object({
@@ -55,11 +59,16 @@ const eventSchema = z.discriminatedUnion("type", [
         .object({ name: z.string().min(1).max(200).optional(), email: z.string().email().max(320).optional() })
         .refine((r) => r.name || r.email, "needs a name or an email")
         .optional(),
-      stages: z
-        .array(z.object({ ...taskFields, blocked_by: z.array(externalId).max(100).optional() }))
-        .max(100)
-        .optional(),
+      stages: z.array(stageSchema).max(100).optional(),
     }),
+  }),
+  // One more stage for a job the sender made earlier. The same shape as a stage of job.create, so it is
+  // checked the same way; project, labels and requested_by come from the job.
+  z.object({
+    ...envelope,
+    type: z.literal("stage.add"),
+    job: externalId,
+    stage: stageSchema,
   }),
   z.object({
     ...envelope,
@@ -134,7 +143,7 @@ export async function handleInbound(request: Request, env: Env): Promise<Respons
   }
 
   const { id, source, type, ...rest } = event.data;
-  const payload = "job" in rest ? rest.job : rest;
+  const payload = event.data.type === "job.create" ? event.data.job : rest;
 
   const db = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
   const { data: teamRow, error: teamError } = await db.from("teams").select("id").eq("key", team).maybeSingle();

@@ -121,9 +121,12 @@ Every event has `id` (unique per team and source), `source` (lowercase name of t
     ] } }
 { "id": "evt_2", "source": "myapp", "type": "stage.ready", "task": "job_42/uploads", "note": "uploads complete" }
 { "id": "evt_3", "source": "myapp", "type": "comment", "task": "job_42", "body": "Client added a note", "author": "Sam" }
+{ "id": "evt_4", "source": "myapp", "type": "stage.add", "job": "job_42", "stage":
+    { "id": "job_42/finish", "title": "Finish the other sizes", "kind": "agent", "ready": true, "blocked_by": ["job_42/cut"] } }
 ```
 
 - **`job.create`** makes the parent task and its stages as sub-tasks, all or nothing, and responds with `{ "tasks": { "<your id>": <CC id> } }`. Each task's `external_ref` is `{source, id, url}`; `requested_by` goes on all of them, and stages inherit the job's labels and priority unless they set their own. `blocked_by` names stages of the same job. A project must be new or already in the sender's team.
+- **`stage.add`** adds one stage to a job the same source made earlier in this team, e.g. after a review decision. `job` is your id of that job (the top-level task, not one of its stages); `stage` takes the same fields as a stage of `job.create` and is made the same way: a sub-task of the job with its own `external_ref`, the job's project and `requested_by`, and the job's labels and priority as they are now unless it sets its own. `blocked_by` names stages already in that job. It responds with `{ "tasks": { "<your stage id>": <CC id> } }`. A cancelled job answers `409` and takes no stage; a done job still takes one.
 - **`stage.ready`** moves a `new` task to `ready`. It still waits for open blockers, and a `ready` task for the owner lands in the inbox when nothing holds it. A task in any other status is left alone, and the response says `"changed": false`: only the owner reopens work or answers for a cancelled blocker.
 - **`comment`** lands in the inbox with author `external`. It isn't typed into a live session and an `@agent` in it does nothing.
 
@@ -131,9 +134,11 @@ Tasks are addressed by the sender's own ids, and only tasks made through this en
 
 Sending an event again with the same `id` returns the first answer with `"duplicate": true`. An `id` reused for a different event gets 409. A failed event isn't recorded, so retry it with the same `id`.
 
-Statuses: `200` applied or duplicate, `400` bad shape, `401` bad signature, `404` no such task (retry if the job may not have arrived yet), `409` id conflict, `413` body over 1 MB, `422` the event can't apply (unknown blocker, cycle, another team's project), `500` retry.
+Statuses: `200` applied or duplicate, `400` bad shape, `401` bad signature, `404` no such task or job (retry if the job may not have arrived yet; `stage.add` answers the same for a job that isn't yours, isn't a job, or doesn't exist), `409` id conflict (an event id reused for a different event, or a task id you've already used), `413` body over 1 MB, `422` the event can't apply (unknown blocker, cycle, another team's project), `500` retry.
 
-**`ready: true` and `stage.ready` approve work.** A ready agent task starts without further review, in a session that runs with permissions skipped, so a team's secret is as powerful as the owner's approval for that team's inbound tasks. The agent's prompt says the task's words came from outside and aren't the owner's instructions beyond the work itself; that's a guardrail, not a sandbox. Only give a secret to an app you trust, and leave `ready` off for anything built from text its users typed.
+**`ready: true` and `stage.ready` approve work.** A ready agent task starts without further review, in a session that runs with permissions skipped, so a team's secret is as powerful as the owner's approval for that team's inbound tasks. `stage.add` with `ready: true` is the same approval given later: it starts an agent on a runner exactly as a ready stage of `job.create` does, under the same signature and checks, so it adds no trust a secret didn't already carry, but it does mean new approved work can appear under a job long after the job was made. The agent's prompt says the task's words came from outside and aren't the owner's instructions beyond the work itself; that's a guardrail, not a sandbox. Only give a secret to an app you trust, and leave `ready` off for anything built from text its users typed.
+
+To test locally: the smoke script covers every event, and `CC_SUPABASE_URL=http://127.0.0.1:57721 CC_SERVICE_KEY=<demo key> node --test mcp/test/inbound.test.mjs` goes through `stage.add` case by case, with `wrangler dev` running and the two `INBOUND_SECRET_…` lines of `.dev.vars.example` in `.dev.vars`.
 
 ## Outbound webhooks (`mcp/src/webhooks.ts`)
 
