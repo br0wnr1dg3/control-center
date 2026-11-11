@@ -113,6 +113,7 @@ struct BoardTask: Codable, Identifiable, Equatable {
     var blockers: [Dependency]?
     var blocks: [Dependency]?
     var waitingOn: [Int]?  // blockers still open, as the runner sees them (waiting_on in SQL)
+    var awaitingReview: Bool?  // its latest published output is undecided (awaiting_review in SQL)
     var attachments: [FileAttachment]?  // screenshots and files added when the task was written
     var completedAt: String?
     var updatedAt: String?
@@ -120,6 +121,7 @@ struct BoardTask: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey {
         case id, title, description, kind, status, priority, project, labels, links, due, today, source, question, worktree, repo, attachments, blockers, blocks
         case waitingOn = "waiting_on"
+        case awaitingReview = "awaiting_review"
         case externalRef = "external_ref"
         case requestedBy = "requested_by"
         case teamId = "team_id"
@@ -169,6 +171,9 @@ struct BoardTask: Codable, Identifiable, Equatable {
     /// Approved or untriaged, but its blockers aren't finished yet. Once started, a blocker no longer holds it.
     var isWaiting: Bool { (status == .ready || status == .new) && !(waitingOn ?? []).isEmpty }
     var waitingLabel: String { "Waiting on " + (waitingOn ?? []).map { "CC-\($0)" }.joined(separator: ", ") }
+
+    /// The agent has published and is waiting for the decision: started, but nobody is working on it.
+    var isAwaitingReview: Bool { status == .in_progress && awaitingReview == true }
 
     var key: String { "CC-\(id)" }
     var priorityLevel: Priority { Priority(rawValue: priority) ?? .none }

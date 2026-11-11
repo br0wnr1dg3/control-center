@@ -505,7 +505,7 @@ struct CompactProperties: View {
         FlowLayout(spacing: 6) {
             Menu {
                 ForEach(TaskStatus.allCases, id: \.self) { s in Button(s.label) { store.setStatus(task, s) } }
-            } label: { StatusPill(status: task.status) }
+            } label: { StatusPill(task: task) }
             .compactMenu()
 
             Menu {

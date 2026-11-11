@@ -23,6 +23,11 @@ const run = promisify(execFile);
 const CONFIG = {
   supabaseUrl: process.env.CC_SUPABASE_URL ?? "https://lkjjphjscavzibalgqhh.supabase.co",
   maxConcurrent: Number(process.env.CC_MAX_CONCURRENT ?? 2),
+  // Sessions that have published for review and gone quiet don't count against maxConcurrent: how many
+  // of them may sit open for free (each is an idle claude process holding memory), and how long a
+  // screen must be still to count as quiet.
+  maxWaiting: Number(process.env.CC_MAX_WAITING ?? 20),
+  reviewIdleMinutes: Number(process.env.CC_REVIEW_IDLE_MINUTES ?? 2),
   pollSeconds: Number(process.env.CC_POLL_SECONDS ?? 20),
   home: process.env.CC_HOME ?? join(homedir(), "Developer", "ControlCenter"),
   cmux: process.env.CC_CMUX ?? "/Applications/cmux.app/Contents/Resources/bin/cmux",
@@ -765,8 +770,52 @@ async function updateDue() {
 
 // ---------- Main loop ----------
 
+// Sessions waiting on a review decision: the task's latest review is undecided (awaiting_review in SQL)
+// and the screen has been still for a while. Stillness matters because publishing isn't always the last
+// thing a session does; one that carries on, or wakes when the decision is typed in, is working again.
+// A wrong guess (a still screen during a background render) only lets one more session start for a
+// while. Returns the ids of the tasks whose session is waiting.
+export async function waitingOnReview(tasks, workspaces, idleMinutes = CONFIG.reviewIdleMinutes) {
+  const waiting = new Set();
+  for (const task of tasks) {
+    const ws = workspaces.get(task.id);
+    if (task.status !== "in_progress" || !task.awaiting_review || !ws) continue;
+    if ((await quietMinutes(ws)) >= idleMinutes) waiting.add(task.id);
+  }
+  return waiting;
+}
+
+// How much of CC_MAX_CONCURRENT is taken: the in-progress tasks with a window on this machine, less
+// those waiting on a review. Only the first maxWaiting of them are free, so a pile of undecided reviews
+// can't keep an unbounded number of sessions open: past that, waiting sessions hold slots again.
+export function slotsInUse(tasks, workspaces, waiting, maxWaiting = CONFIG.maxWaiting) {
+  const live = tasks.filter((t) => t.status === "in_progress" && workspaces.has(t.id));
+  const free = Math.min(live.filter((t) => waiting.has(t.id)).length, Math.max(0, maxWaiting));
+  return live.length - free;
+}
+
+// Said when it changes, not every poll.
+let lastWaiting = "";
+
+let toldNoColumn = false;
+
+// The agent's open tasks. Runners update themselves as soon as main is pushed, which can be before the
+// awaiting_review migration reaches the database: until then, carry on with nothing counted as waiting
+// rather than fail every poll.
+async function agentTasks() {
+  const query = (columns) => db(`tasks?kind=eq.agent&status=in.(ready,in_progress,needs_you)&select=${columns}&order=sort_order,id`);
+  try {
+    return await query("*,waiting_on,awaiting_review");
+  } catch (err) {
+    if (!err.message.includes("awaiting_review does not exist")) throw err;
+    if (!toldNoColumn) log("the database has no awaiting_review yet (migration not pushed); sessions waiting on a review still hold slots");
+    toldNoColumn = true;
+    return query("*,waiting_on");
+  }
+}
+
 export async function tick() {
-  const tasks = await db("tasks?kind=eq.agent&status=in.(ready,in_progress,needs_you)&select=*,waiting_on&order=sort_order,id");
+  const tasks = await agentTasks();
   // priority 0 means none, so sort urgent (1) .. low (4) first and none last.
   tasks.sort((a, b) => (a.priority || 5) - (b.priority || 5));
   const workspaces = await taskWorkspaces();
@@ -774,7 +823,18 @@ export async function tick() {
   await cleanupWorktrees(workspaces).catch((err) => log("cleanup:", err.message));
   await syncRepos().catch((err) => log("repo sync:", err.message));
   await syncLinear(db, { owner: OWNER, log }).catch((err) => log("linear:", err.message));
-  let running = tasks.filter((t) => t.status === "in_progress" && workspaces.has(t.id)).length;
+  await dispatch(tasks, workspaces);
+}
+
+// Deliver comments and answers to live sessions, and start ready work while there's a free slot.
+export async function dispatch(tasks, workspaces) {
+  const waiting = await waitingOnReview(tasks, workspaces);
+  let running = slotsInUse(tasks, workspaces, waiting);
+  const said = [...waiting].map((id) => `CC-${id}`).join(", ");
+  if (said !== lastWaiting) {
+    log(said ? `waiting on a review: ${said} (up to ${CONFIG.maxWaiting} hold no slot); ${running}/${CONFIG.maxConcurrent} slots in use` : "no session is waiting on a review");
+    lastWaiting = said;
+  }
 
   for (const task of tasks) {
     const ws = workspaces.get(task.id);

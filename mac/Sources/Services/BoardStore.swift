@@ -75,7 +75,8 @@ final class BoardStore {
     }
     /// Questions from any team: they block agents, so they show whichever team is in view.
     var needsYou: [BoardTask] { allTasks.filter { $0.status == .needs_you } }
-    var running: [BoardTask] { tasks.filter { $0.status == .in_progress && $0.kind == .agent } }
+    // Not the ones that have published and are waiting for a decision: nothing is running there.
+    var running: [BoardTask] { tasks.filter { $0.status == .in_progress && $0.kind == .agent && !$0.isAwaitingReview } }
     /// Projects in the current team: ones with tasks plus ones set up in team settings.
     var projects: [String] {
         let specs = projectSpecs.filter { teamFilter == nil || $0.teamId == teamFilter }.map(\.name)

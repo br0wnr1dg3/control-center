@@ -243,6 +243,8 @@ To test locally: `CC_SUPABASE_URL=http://127.0.0.1:57721 CC_SERVICE_KEY=<demo ke
 
 Agents share outputs as links, not file paths: `cc-publish <file> --title "Cut v2 · 9:16"` uploads to R2 (bucket `control-center-media`, Bearer `UPLOAD_TOKEN`), attaches the link to the task and prints it. Each file gets a private `/r/<token>` page: videos get a frame-accurate player (frame stepping, timeline markers) where Chris and the team leave notes on exact frames (with a still of each), then **Approve** or **Request changes**; images, PDFs and HTML pages open inline (HTML sandboxed). Notes are stored quietly; the decision is posted to the task as one `reviewer` comment listing every note with its timecode, lands in the inbox, and the runner types it into the waiting agent session, which makes the next version or wraps up.
 
+**Waiting on a review is free.** The session that published stays open with its context and worktree, and its task stays `in_progress`, but `awaiting_review(task)` is true while the task's latest review is undecided: a SQL function like `waiting_on`, exposed as a computed column (`select=*,awaiting_review`). The board shows such a task as "Awaiting review" rather than "In progress", and `get_task` / `list_tasks` return the field. Once that session's screen has been still for `CC_REVIEW_IDLE_MINUTES` (2), the runner stops counting it against `CC_MAX_CONCURRENT`, so any number of cuts can wait for a decision without holding up new work. The decision is typed into the same session; from then it counts again, so the runner can briefly be over its limit rather than make a reviewer's notes queue. At most `CC_MAX_WAITING` (20) waiting sessions are free on one machine, since each is an idle `claude` process; beyond that they hold slots again.
+
 `cc-publish --completes-task` makes approval the end of the task: approving marks the task `done` and posts the decision, which says so only if that worked. Any approved stage waiting on it then starts. Requesting changes works as usual. The runner types any undelivered comment into a done task's session before asking it to clean up, so the session still sees the decision.
 
 ### Batches (`mcp/src/batch.ts`)
@@ -278,9 +280,9 @@ runner/install.sh                 # launchd agent: start at login, keep alive (l
 runner/install.sh uninstall
 ```
 
-New machine: `node runner/clone-repos.mjs` clones every repo on the board into the same folders (the runner's published inventory, minus hidden ones), so agents find the same paths everywhere. `CC_MAX_CONCURRENT=<n>` on `install.sh` sets how many agents run at once.
+New machine: `node runner/clone-repos.mjs` clones every repo on the board into the same folders (the runner's published inventory, minus hidden ones), so agents find the same paths everywhere. `CC_MAX_CONCURRENT=<n>` on `install.sh` sets how many agents run at once. Sessions waiting on the owner (`needs_you`) or on a review (above) aren't counted.
 
-Requires: cmux, `claude` signed in to the control-center MCP (`/mcp`), service key in Keychain (`control-center service key`). Env overrides: `CC_MAX_CONCURRENT`, `CC_POLL_SECONDS`, `CC_CLOSE_AFTER_MINUTES`, `CC_CLEANUP_MINUTES`, `CC_REPO_SYNC_MINUTES`, `CC_UPDATE_MINUTES`, `CC_LINEAR_MINUTES`. Needs `git` and `gh` (signed in) for worktree cleanup.
+Requires: cmux, `claude` signed in to the control-center MCP (`/mcp`), service key in Keychain (`control-center service key`). Env overrides: `CC_MAX_CONCURRENT`, `CC_MAX_WAITING`, `CC_REVIEW_IDLE_MINUTES`, `CC_POLL_SECONDS`, `CC_CLOSE_AFTER_MINUTES`, `CC_CLEANUP_MINUTES`, `CC_REPO_SYNC_MINUTES`, `CC_UPDATE_MINUTES`, `CC_LINEAR_MINUTES`. Needs `git` and `gh` (signed in) for worktree cleanup.
 
 ## Mac app (`mac/`)
 

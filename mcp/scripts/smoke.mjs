@@ -181,7 +181,7 @@ assert(human.project === "Content" && human.priority === 2, "handoff inherits pr
 console.log(`✓ ${human.key} on today, inherits project + priority`);
 
 const full = await call("get_task", { id: `CC-${t.id}` });
-assert(full.status === "done" && full.subtasks.length === 1 && full.comments.length === 4 && full.links.length === 1 && full.labels.includes("draft"), "get_task");
+assert(full.status === "done" && full.subtasks.length === 1 && full.comments.length === 4 && full.links.length === 1 && full.labels.includes("draft") && full.awaiting_review === false, "get_task");
 console.log(`✓ get_task: ${full.comments.length} comments, ${full.activity.length} activity, links + labels`);
 
 await call("mark_inbox_read", { task_id: t.id });
@@ -296,7 +296,9 @@ if (uploadToken) {
   assert((await statusOf(reviewed.id)) === "ready", "a plain approval doesn't finish the task");
   const completing = await publish(reviewed.id, "&completes_task=1");
   assert((await (await fetch(`${BASE}/r/${completing}/data`)).json()).review.completes_task, "review data shows completes_task");
+  assert((await call("get_task", { id: reviewed.id })).awaiting_review === true, "an undecided latest review shows as awaiting_review");
   await decide(completing, "changes");
+  assert((await call("get_task", { id: reviewed.id })).awaiting_review === false, "a decision ends awaiting_review");
   assert((await statusOf(reviewed.id)) === "ready", "requesting changes doesn't finish the task");
   assert((await call("get_task", { id: next.id })).waiting_on.length === 1, "next stage waits");
   await decide(completing, "approve");

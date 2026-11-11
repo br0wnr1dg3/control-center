@@ -209,7 +209,7 @@ struct CalendarCard: View {
                         Image(systemName: "flag.fill").font(.system(size: 9)).foregroundStyle(.red).help("Deadline")
                     }
                     Spacer(minLength: 0)
-                    if task.status != .new && task.status != .ready { StatusPill(status: task.status) }
+                    if task.status != .new && task.status != .ready { StatusPill(task: task) }
                 }
             }
         }

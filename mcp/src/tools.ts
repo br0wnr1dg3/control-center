@@ -25,7 +25,7 @@ const views = ["today", "upcoming", "new", "agent_ready", "needs_you", "human", 
 
 const OPEN = "(done,cancelled)";
 const LIST_FIELDS =
-  "id,title,kind,status,priority,team:teams(key,name),project,labels,scheduled_on,due,today,parent_id,question,updated_at,waiting_on,external_ref,requested_by";
+  "id,title,kind,status,priority,team:teams(key,name),project,labels,scheduled_on,due,today,parent_id,question,updated_at,waiting_on,awaiting_review,external_ref,requested_by";
 
 // Accept 12, "12" or "CC-12".
 const taskId = z.preprocess(
@@ -278,7 +278,7 @@ export function buildServer(env: Env) {
     },
     async ({ id }) => {
       const [task, children, blockers, blocking, comments, events] = await Promise.all([
-        db.from("tasks").select("*,waiting_on,team:teams(key,name)").eq("id", id).single(),
+        db.from("tasks").select("*,waiting_on,awaiting_review,team:teams(key,name)").eq("id", id).single(),
         db.from("tasks").select("id,title,kind,status").eq("parent_id", id).order("id"),
         db.from("task_dependencies").select("task:tasks!blocked_by_id(id,title,kind,status)").eq("task_id", id).order("blocked_by_id"),
         db.from("task_dependencies").select("task:tasks!task_id(id,title,kind,status)").eq("blocked_by_id", id).order("task_id"),
