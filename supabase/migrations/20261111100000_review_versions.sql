@@ -115,7 +115,8 @@ revoke all on function set_current_review(bigint) from public, anon, authenticat
 grant execute on function set_current_review(bigint) to service_role;
 
 -- review.published and review.decided say which version they're about. Fields are only added:
--- version (this one's number), versions (how many the piece has) and current (false = superseded).
+-- version (this one's number), versions (how many the piece has), current (false = superseded) and
+-- current_id (the review that does count), so a receiver needn't assume the newest is the one.
 create or replace function webhooks_on_review() returns trigger language plpgsql as $$
 declare
   t tasks;
@@ -133,7 +134,8 @@ begin
       'decided_at', new.decided_at,
       'version', new.version,
       'versions', (select count(*) from reviews where piece_id = new.piece_id),
-      'current', new.is_current
+      'current', new.is_current,
+      'current_id', (select id from reviews where piece_id = new.piece_id and is_current)
     ))
   );
   return null;

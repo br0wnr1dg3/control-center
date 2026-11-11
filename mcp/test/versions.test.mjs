@@ -232,16 +232,17 @@ test("approving a superseded version has to be confirmed; the comment and the we
   assert.match(ok(await comments()).at(-1).body, /^Approved "Cut v2" \(version 2, superseded by version 1\)\./);
 
   const sent = ok(await db.from("webhook_deliveries").select("event_type,payload").eq("task_id", task.id).like("event_type", "review.%").order("id"));
-  const told = sent.map((d) => [d.event_type, d.payload.review.title, d.payload.review.decision, d.payload.review.version, d.payload.review.versions, d.payload.review.current]);
+  const told = sent.map((d) => [d.event_type, d.payload.review.title, d.payload.review.decision, d.payload.review.version, d.payload.review.versions, d.payload.review.current, d.payload.review.current_id]);
+  // current_id names the review that counts, so a receiver needn't take the newest for it: v1 here, once v2 was withdrawn.
   assert.deepEqual(told, [
-    ["review.published", "Cut v1", null, 1, 1, true],
-    ["review.published", "Cut v2", null, 2, 2, true],
-    ["review.decided", "Cut v2", "changes_requested", 2, 2, false],
-    ["review.decided", "Cut v1", "approved", 1, 2, true],
-    ["review.decided", "Cut v2", "approved", 2, 2, false],
+    ["review.published", "Cut v1", null, 1, 1, true, v1.review_id],
+    ["review.published", "Cut v2", null, 2, 2, true, v2.review_id],
+    ["review.decided", "Cut v2", "changes_requested", 2, 2, false, v1.review_id],
+    ["review.decided", "Cut v1", "approved", 1, 2, true, v1.review_id],
+    ["review.decided", "Cut v2", "approved", 2, 2, false, v1.review_id],
   ]);
   // Fields were only added.
-  assert.deepEqual(Object.keys(sent[0].payload.review).sort(), ["current", "decided_at", "decided_by", "decision", "id", "title", "token", "version", "versions"]);
+  assert.deepEqual(Object.keys(sent[0].payload.review).sort(), ["current", "current_id", "decided_at", "decided_by", "decision", "id", "title", "token", "version", "versions"]);
 });
 
 test("a batch card is the piece's current version, whichever version was added", async () => {
