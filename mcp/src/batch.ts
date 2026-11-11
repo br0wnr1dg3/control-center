@@ -253,6 +253,7 @@ async function data(db: SupabaseClient, batch: Batch & { team: { key: string; na
       notes: waiting(r),
       version: r.version,
       versions: count,
+      piece: r.piece_id,
       task: r.task,
     })),
   });
@@ -314,6 +315,7 @@ const BATCH_PAGE = String.raw`<!doctype html>
   button:disabled { opacity: .5; cursor: default; }
   .ask input { width: 100%; font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--warn); background: var(--bg); color: var(--text); }
   .state:empty, .hint:empty { display: none; }
+  .state.moved { color: var(--warn); }
   #empty { padding: 40px 20px; text-align: center; }
   #undo { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 3; max-width: calc(100vw - 24px); overflow: hidden;
           display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg);
@@ -439,7 +441,7 @@ function play(token, on) {
   if (on) v.play().catch(() => {}); else v.pause();
 }
 
-const shown = () => items.filter((i) => !undecidedOnly || i.status === "open" || i.token === asking || i.busy);
+const shown = () => items.filter((i) => !undecidedOnly || i.status === "open" || i.token === asking || i.busy || i.moved);
 
 function render() {
   const visible = shown(), grid = $("grid");
@@ -466,6 +468,7 @@ function render() {
     q(".ask input").placeholder = item.notes ? "Message (optional): Enter sends, Esc cancels" : "What should change? Enter sends, Esc cancels";
     for (const b of el.querySelectorAll("button")) b.disabled = Boolean(item.busy);
     q(".state").textContent = item.state || "";
+    q(".state").classList.toggle("moved", Boolean(item.moved));
   });
   const decided = items.filter((i) => i.status !== "open").length;
   $("count").textContent = decided + " of " + items.length + " decided";
@@ -496,7 +499,7 @@ function settle(item, status, who) {
   // Looked up before this one drops out of an undecided-only grid.
   const order = shown(), at = order.indexOf(item);
   const next = order.slice(at + 1).concat(order.slice(0, at)).find((i) => i.status === "open" && i !== item);
-  item.status = status; item.decided_by = who; item.notes = 0; item.state = "";
+  item.status = status; item.decided_by = who; item.notes = 0; item.state = ""; item.moved = false;
   if (selected === item.token && next) select(next.token, true);
   else if (selected === item.token && undecidedOnly) { selected = null; render(); }
   else render();
@@ -514,8 +517,22 @@ async function send(item, decision, message, who, before) {
     else { failure = (await res.text()) || String(res.status); try { failure = JSON.parse(failure).error || failure; } catch {} }
   } catch (e) { failure = String(e.message || e); }
   item.busy = false;
-  // A refusal usually means the cut changed under this tab (a newer version, or this one withdrawn): show what's there now.
-  if (failure) { Object.assign(item, before, { state: "Couldn't send: " + failure }); render(); load(); return; }
+  if (failure) {
+    Object.assign(item, before, { state: "Couldn't send: " + failure }); render();
+    // A refusal usually means the cut changed under this tab (a newer version, or this one withdrawn): show
+    // what's there now. That swaps this card for the piece's current version, taking the message above with
+    // it, so the card that took its place says what happened and stays in view until it's decided.
+    const wasSelected = selected === item.token;
+    await load();
+    const now = items.find((i) => i.piece === item.piece);
+    if (now && now !== item) {
+      now.moved = true;
+      now.state = "Not sent: version " + item.version + " is superseded. This card is now version " + now.version + ", the current one; nothing was decided.";
+      if (wasSelected) selected = now.token;
+      render();
+    }
+    return;
+  }
   item.status = reply.status;
   item.state = reply.completed_task ? "CC-" + item.task.id + " is done." : "";
   render();
@@ -647,7 +664,7 @@ async function load() {
     const mine = items.find((i) => i.token === fresh.token);
     if (!mine) return fresh;
     if (mine.busy || (held && held.item === mine)) return mine;
-    if (mine.status !== fresh.status) mine.state = "";
+    if (mine.status !== fresh.status) { mine.state = ""; mine.moved = false; }
     return Object.assign(mine, fresh);
   });
   loaded = true;

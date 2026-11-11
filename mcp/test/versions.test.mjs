@@ -252,13 +252,17 @@ test("a batch card is the piece's current version, whichever version was added",
   const v2 = await publish(sub.id, "Cut v2", "&batch=Friday");
   const v3 = await publish(sub.id, "Cut v3", "&batch=Friday");
   const batch = v3.batch_url.split("/").pop();
-  const cards = async (token = batch) => (await (await fetch(`${BASE}/b/${token}/data`)).json()).items.map((i) => [i.token, i.title, i.version, i.versions]);
+  const items = async (token = batch) => (await (await fetch(`${BASE}/b/${token}/data`)).json()).items;
+  const cards = async (token = batch) => (await items(token)).map((i) => [i.token, i.title, i.version, i.versions]);
+  const piece = (await items())[0].piece;
   assert.deepEqual(await cards(), [[v3.token, "Cut v3", 3, 3]]);
 
   // v3 is withdrawn: the grid shows v2, and v3 can't be approved from a tab that still has it.
   assert.equal((await makeCurrent(v2.token)).status, 200);
   assert.deepEqual(await cards(), [[v2.token, "Cut v2", 2, 3]]);
   assert.equal((await decide(v3.token, { decision: "approve" })).status, 409);
+  // The card that took v3's place is the same piece: that's how a stale tab finds it and says the cut moved.
+  assert.equal((await items())[0].piece, piece);
 
   // A batch made from links shows the current version of what was listed, once.
   const listed = await fetch(`${BASE}/api/batches`, {
@@ -276,5 +280,7 @@ test("a batch card is the piece's current version, whichever version was added",
     body: JSON.stringify({ title: "Gathered", parent: parent.id }),
   });
   assert.deepEqual([(await gathered.json()).added], [1]);
-  assert.match(await (await fetch(v3.batch_url)).text(), /"v" \+ item\.version \+ " of " \+ item\.versions/);
+  const page = await (await fetch(v3.batch_url)).text();
+  assert.match(page, /"v" \+ item\.version \+ " of " \+ item\.versions/);
+  assert.match(page, /items\.find\(\(i\) => i\.piece === item\.piece\)/);
 });

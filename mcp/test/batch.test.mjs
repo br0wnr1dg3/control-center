@@ -91,9 +91,9 @@ test("a batch for a parent task gathers the open reviews under it, the current v
   assert.deepEqual(titles(data).sort(), ["Cut v2", "Thumbnail"]);
   assert.deepEqual(data.batch, { title: "Monday", team: { key: team.key, name: team.name } });
   const item = data.items.find((i) => i.title === "Thumbnail");
-  assert.deepEqual({ ...item, token: null }, {
+  assert.deepEqual({ ...item, token: null, piece: typeof item.piece }, {
     token: null, title: "Thumbnail", status: "open", decided_by: null, content_type: "text/plain", filename: "cut.txt",
-    completes_task: false, notes: 0, version: 1, versions: 1, task: { id: b.id, title: "Video B" },
+    completes_task: false, notes: 0, version: 1, versions: 1, piece: "number", task: { id: b.id, title: "Video B" },
   });
   assert.deepEqual((await task(parent.id)).links, [{ title: "Review batch: Monday", url: batch.url }], "the link is attached to the parent");
 
