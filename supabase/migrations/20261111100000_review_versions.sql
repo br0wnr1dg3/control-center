@@ -33,20 +33,29 @@ language sql immutable as $$
     '[^[:alnum:]]+', '', 'g'), '');
 $$;
 
--- Reviews published before this: grouped by the same rule, in the order they were published.
-with numbered as (
-  select id,
+-- Reviews published before this: grouped by the same rule, in the order they were published. Nothing
+-- recorded which version counted, so: the newest, unless an earlier one was approved and nothing
+-- published after it has been decided. That approval stands until someone decides a later version;
+-- an undecided later upload doesn't demote it (`cc-publish --make-current` corrects a wrong guess).
+with grouped as (
+  select id, status,
          first_value(id) over w as piece,
-         row_number() over w as n,
-         count(*) over w2 as total
+         row_number() over w as n
     from reviews
-  window w as (partition by task_id, coalesce(review_piece_key(title), '#' || id) order by created_at, id),
-         w2 as (partition by task_id, coalesce(review_piece_key(title), '#' || id))
+  window w as (partition by task_id, coalesce(review_piece_key(title), '#' || id) order by created_at, id)
+), ranked as (
+  select id, piece, n,
+         max(n) over p as newest,
+         max(n) filter (where status = 'approved') over p as approved,
+         max(n) filter (where status <> 'open') over p as decided
+    from grouped
+  window p as (partition by piece)
 )
 update reviews r
-   set piece_id = n.piece, version = n.n, is_current = (n.n = n.total)
-  from numbered n
- where n.id = r.id;
+   set piece_id = k.piece, version = k.n,
+       is_current = (k.n = case when k.approved = k.decided then k.approved else k.newest end)
+  from ranked k
+ where k.id = r.id;
 
 alter table reviews
   alter column piece_id set not null,
