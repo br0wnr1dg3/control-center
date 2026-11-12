@@ -510,6 +510,8 @@ final class BoardStore {
     /// Agents waiting on you first (they're blocked), then newest first. A question that's been read is
     /// still unanswered, so waiting comes from the task's live status, not the notification's read state.
     var inboxThreads: [InboxThread] {
+        // A stopped session isn't asking you anything: it stays on the board in Needs you, not in the inbox.
+        let needsYou = needsYou.filter { !$0.isStopped }
         let waiting = Set(needsYou.map(\.id))
         var threads = Dictionary(grouping: inbox, by: \.task.id)
             .map { InboxThread(items: $0.value.sorted { $0.createdAt > $1.createdAt }, waiting: waiting.contains($0.key)) }
