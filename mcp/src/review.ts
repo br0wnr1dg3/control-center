@@ -169,6 +169,11 @@ async function makeCurrent(request: Request, env: ReviewEnv) {
 // ---------- Files ----------
 
 // Video needs Range support to scrub; HTML outputs are sandboxed so they can't touch this origin.
+// The sandbox comes from this header alone (the pages' iframes carry no sandbox attribute), so it holds
+// however the file is opened. A link a person clicks in a sandboxed page opens as an ordinary tab
+// (allow-popups-to-escape-sandbox): a tab that inherited the sandbox has no origin of its own, so the site
+// it opens has no cookies or storage and mostly breaks. The page itself stays sandboxed: no allow-same-origin,
+// no allow-top-navigation, and a tab it opens onto this origin's HTML files is sandboxed again by this header.
 async function serveObject(request: Request, env: ReviewEnv, key: string, contentType: string | null) {
   const rangeHeader = request.headers.get("Range");
   const object = await env.MEDIA.get(key, rangeHeader ? { range: request.headers } : undefined);
@@ -180,7 +185,7 @@ async function serveObject(request: Request, env: ReviewEnv, key: string, conten
   headers.set("Accept-Ranges", "bytes");
   headers.set("Cache-Control", "private, max-age=3600");
   headers.set("X-Content-Type-Options", "nosniff");
-  headers.set("Content-Security-Policy", "sandbox allow-scripts allow-popups");
+  headers.set("Content-Security-Policy", "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox");
 
   if (rangeHeader && "range" in object && object.range) {
     const r = object.range as { offset?: number; length?: number; suffix?: number };

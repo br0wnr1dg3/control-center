@@ -73,6 +73,33 @@ after(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("an HTML review file is sandboxed by its own header; a link clicked in it opens as an ordinary tab", async () => {
+  const t = await addTask(`Card ${run}`);
+  const res = await fetch(`${BASE}/api/publish?task=${t.id}&filename=card.html&title=${encodeURIComponent(`Card ${run}`)}`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${UPLOAD}`, "content-type": "text/html" },
+    body: '<!doctype html><a href="https://example.com/" target="_blank" rel="noopener noreferrer">out</a>',
+  });
+  const made = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(made));
+  const token = made.url.split("/").pop();
+
+  const file = await fetch(`${BASE}/r/${token}/file`);
+  assert.match(file.headers.get("content-type"), /^text\/html/);
+  const flags = file.headers.get("content-security-policy").split(/\s+/);
+  // Scripts run and a clicked link opens a tab that isn't sandboxed; the page never gets this origin or the top window.
+  assert.deepEqual(flags, ["sandbox", "allow-scripts", "allow-popups", "allow-popups-to-escape-sandbox"]);
+  assert.equal(file.headers.get("x-content-type-options"), "nosniff");
+
+  // Neither page wraps the file in a sandbox attribute of its own (which would have to allow the same), so the
+  // header is the whole policy; the batch tile stays something you can't click into.
+  const page = await (await fetch(`${BASE}/r/${token}`)).text();
+  const batch = await madeBatch({ title: `Cards ${run}`, reviews: [made.url] });
+  const grid = await (await fetch(`${BASE}/b/${batch.token}`)).text();
+  for (const html of [page, grid]) assert.doesNotMatch(html, /sandbox\s*=|\.sandbox\b|setAttribute\(\s*["']sandbox/);
+  assert.match(grid, /\.thumb iframe \{[^}]*pointer-events: none/);
+});
+
 test("notes and decisions are accepted only from Control Center's own pages, or with the upload token", async () => {
   const t = await addTask(`Guarded ${run}`);
   const r = await publish(t.id, `Guarded ${run}`);
