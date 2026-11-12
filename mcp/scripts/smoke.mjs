@@ -284,7 +284,7 @@ if (uploadToken) {
   const decide = async (token, decision) => {
     const res = await fetch(`${BASE}/r/${token}/decision`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { authorization: `Bearer ${uploadToken}`, "content-type": "application/json" },
       body: JSON.stringify({ name: "Smoke", decision }),
     });
     if (!res.ok) throw new Error(`decision failed: ${res.status} ${await res.text()}`);
@@ -299,7 +299,7 @@ if (uploadToken) {
   assert(completingData.review.completes_task, "review data shows completes_task");
   // Published under the same title on the same task, it's version 2 of the same piece, and version 1 is superseded.
   assert(completingData.versions.map((v) => `${v.version}${v.current ? "*" : ""}`).join() === "2*,1", `versions chain by title: ${JSON.stringify(completingData.versions)}`);
-  const stale = await fetch(`${BASE}/r/${plain}/decision`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Smoke", decision: "approve" }) });
+  const stale = await fetch(`${BASE}/r/${plain}/decision`, { method: "POST", headers: { authorization: `Bearer ${uploadToken}`, "content-type": "application/json" }, body: JSON.stringify({ name: "Smoke", decision: "approve" }) });
   assert(stale.status === 409 && (await stale.json()).superseded, "approving a superseded version has to be confirmed");
   assert((await call("get_task", { id: reviewed.id })).awaiting_review === true, "an undecided latest review shows as awaiting_review");
   await decide(completing, "changes");
@@ -661,7 +661,7 @@ if (!cronRuns) {
     const token = published.url.split("/").pop();
     await fetch(`${BASE}/r/${token}/decision`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { authorization: `Bearer ${uploadToken}`, "content-type": "application/json" },
       body: JSON.stringify({ name: "Smoke", decision: "approve" }),
     });
     await cron();

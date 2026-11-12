@@ -54,9 +54,10 @@ const madeBatch = async (body) => {
   return { ...made, token: made.url.split("/").pop() };
 };
 const batchData = async (token) => (await fetch(`${BASE}/b/${token}/data`)).json();
-// What both pages send when a reviewer decides.
+// What both pages send when a reviewer decides: a browser names the page's own origin.
+const PAGE = { "content-type": "application/json", origin: new URL(BASE).origin };
 const decide = (token, decision, message) =>
-  fetch(`${BASE}/r/${token}/decision`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Sam", decision, message }) });
+  fetch(`${BASE}/r/${token}/decision`, { method: "POST", headers: PAGE, body: JSON.stringify({ name: "Sam", decision, message }) });
 const titles = (data) => data.items.map((i) => i.title);
 
 before(async () => {
@@ -70,6 +71,50 @@ after(async () => {
   await db.from("tasks").delete().eq("team_id", team.id);
   await db.from("teams").delete().eq("id", team.id);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("notes and decisions are accepted only from Control Center's own pages, or with the upload token", async () => {
+  const t = await addTask(`Guarded ${run}`);
+  const r = await publish(t.id, `Guarded ${run}`);
+  const own = new URL(BASE).origin;
+  const post = (path, headers, body = { name: "Sam", decision: "approve", body: "A note" }) =>
+    fetch(`${BASE}/r/${r.token}/${path}`, { method: "POST", headers: { "content-type": "text/plain", ...headers }, body: JSON.stringify(body) });
+  const status = async () => ok(await db.from("reviews").select("status").eq("token", r.token).single()).status;
+
+  const refused = [
+    ["a document with no origin", { origin: "null" }],
+    ["a document with no origin, as a browser also labels it", { origin: "null", "sec-fetch-site": "cross-site" }],
+    ["another site", { origin: "https://elsewhere.example" }],
+    ["another site that names this origin's host on another port", { origin: `${own}0` }],
+    ["a browser request from another site that names no origin", { "sec-fetch-site": "cross-site" }],
+    ["a sibling site", { "sec-fetch-site": "same-site" }],
+    ["this origin named, but from another site", { origin: own, "sec-fetch-site": "cross-site" }],
+    ["no browser and no token", {}],
+    ["no browser and the wrong token", { authorization: "Bearer not-the-token" }],
+    ["another origin, even with the token", { origin: "null", authorization: `Bearer ${UPLOAD}` }],
+  ];
+  for (const [what, headers] of refused) {
+    for (const path of ["decision", "notes"]) {
+      const res = await post(path, headers);
+      assert.equal(res.status, 403, `${what}: ${path}`);
+      assert.match((await res.json()).error, /only from Control Center's own pages/);
+    }
+  }
+  assert.equal(await status(), "open", "nothing was decided");
+  assert.equal(ok(await db.from("task_comments").select("id").eq("review_id", r.review_id)).length, 0, "and no note kept");
+  // Reading by the link alone is unchanged.
+  assert.equal((await fetch(`${BASE}/r/${r.token}/data`)).status, 200);
+
+  // The pages themselves: the origin, the browser's own label, or both.
+  assert.equal((await post("notes", { origin: own })).status, 200);
+  assert.equal((await post("notes", { "sec-fetch-site": "same-origin" })).status, 200);
+  assert.equal((await post("notes", { origin: own, "sec-fetch-site": "same-origin" })).status, 200);
+  // Something that isn't a browser holds the upload token, as for publishing.
+  assert.equal((await post("notes", { authorization: `Bearer ${UPLOAD}` })).status, 200);
+  assert.equal((await post("decision", { authorization: `Bearer ${UPLOAD}` }, { name: "Sam", decision: "changes" })).status, 200);
+  assert.equal(await status(), "changes_requested");
+  assert.equal((await post("decision", { origin: own, "sec-fetch-site": "same-origin" })).status, 200);
+  assert.equal(await status(), "approved");
 });
 
 test("a batch for a parent task gathers the open reviews under it, the current version of each", async () => {
@@ -241,7 +286,7 @@ test("deciding from a batch is the review's own decision: comment, inbox, webhoo
   // A frame note left on the review's own page waits for the decision; the batch says so and sends it.
   const note = await fetch(`${BASE}/r/${changing.token}/notes`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: PAGE,
     body: JSON.stringify({ name: "Sam", body: "Logo is cut off", timecode: 2.5 }),
   });
   assert.equal(note.status, 200);
