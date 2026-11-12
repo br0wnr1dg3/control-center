@@ -331,17 +331,25 @@ struct InboxItem: Codable, Identifiable, Equatable {
     let id: Int
     let kind: String   // question | comment | handoff | done | stalled
     let body: String
+    /// Who wrote it, for comments (me | claude | agent | reviewer | external); nil otherwise.
+    var author: String? = nil
     let readAt: String?
     let createdAt: String
     let task: TaskRef
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, body, task
+        case id, kind, body, task, author
         case readAt = "read_at"
         case createdAt = "created_at"
     }
 
     var isUnread: Bool { readAt == nil }
+
+    /// Something for you to act on or read: not an agent finishing (anything left for you comes back as a
+    /// hand-off) and not the notes agents and Claude post as they work.
+    var needsYou: Bool {
+        kind != "done" && !(kind == "comment" && (author == "agent" || author == "claude"))
+    }
 
     var symbol: String {
         switch kind {

@@ -127,7 +127,7 @@ struct BoardAPI {
     }
 
     func fetchInbox() async throws -> [InboxItem] {
-        try await get("notifications?select=id,kind,body,read_at,created_at,task:tasks(id,title,status)&order=created_at.desc&limit=100")
+        try await get("notifications?select=id,kind,body,author,read_at,created_at,task:tasks(id,title,status)&order=created_at.desc&limit=100")
     }
 
     func fetchComments(_ taskId: Int) async throws -> [TaskComment] {
