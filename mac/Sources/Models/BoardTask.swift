@@ -174,6 +174,8 @@ struct BoardTask: Codable, Identifiable, Equatable {
 
     /// The agent has published and is waiting for the decision: started, but nobody is working on it.
     var isAwaitingReview: Bool { status == .in_progress && awaitingReview == true }
+    /// Its session window closed mid-task (runner.mjs): parked in Needs you to resume, not a question for you.
+    var isStopped: Bool { status == .needs_you && question?.hasPrefix("The session window closed") == true }
 
     var key: String { "CC-\(id)" }
     var priorityLevel: Priority { Priority(rawValue: priority) ?? .none }
@@ -346,9 +348,9 @@ struct InboxItem: Codable, Identifiable, Equatable {
     var isUnread: Bool { readAt == nil }
 
     /// Something for you to act on or read: not an agent finishing (anything left for you comes back as a
-    /// hand-off) and not the notes agents and Claude post as they work.
+    /// hand-off), a session stopping, or the notes agents and Claude post as they work.
     var needsYou: Bool {
-        kind != "done" && !(kind == "comment" && (author == "agent" || author == "claude"))
+        kind != "done" && kind != "stalled" && !(kind == "comment" && (author == "agent" || author == "claude"))
     }
 
     var symbol: String {
