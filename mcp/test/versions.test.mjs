@@ -46,9 +46,11 @@ async function publish(taskId, title, query = "") {
   assert.equal(res.status, 200, JSON.stringify(body));
   return { ...body, token: body.url.split("/").pop() };
 }
+// What the pages send with a note or a decision: a browser names the page's own origin.
+const PAGE = { "content-type": "application/json", origin: new URL(BASE).origin };
 const reviewData = async (token) => (await fetch(`${BASE}/r/${token}/data`)).json();
 const decide = (token, body) =>
-  fetch(`${BASE}/r/${token}/decision`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Sam", ...body }) });
+  fetch(`${BASE}/r/${token}/decision`, { method: "POST", headers: PAGE, body: JSON.stringify({ name: "Sam", ...body }) });
 const makeCurrent = (review, token = UPLOAD) =>
   fetch(`${BASE}/api/reviews/current`, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ review }) });
 // [version, current, latest] for each, newest first, as the rail lists them.
@@ -147,7 +149,7 @@ test("versions published on a task chain by title; each keeps its own link, note
   assert.deepEqual(rail(await reviewData(report.token)), [[1, true, true]], "one version: nothing to stack");
 
   // A note and a decision on v1 stay on v1.
-  await fetch(`${BASE}/r/${v1.token}/notes`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Sam", body: "Too slow", timecode: 1.5 }) });
+  await fetch(`${BASE}/r/${v1.token}/notes`, { method: "POST", headers: PAGE, body: JSON.stringify({ name: "Sam", body: "Too slow", timecode: 1.5 }) });
   assert.equal((await decide(v1.token, { decision: "changes" })).status, 200);
   const after = await reviewData(v2.token);
   assert.deepEqual(after.versions.map((v) => [v.version, v.status, v.decided_by]), [[2, "open", null], [1, "changes_requested", "Sam"]]);

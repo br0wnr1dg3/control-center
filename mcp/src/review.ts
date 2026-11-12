@@ -6,10 +6,11 @@
 //   GET  /r/<team>/<token>                                review page (/r/<token> redirects here)
 //   GET  /r/<token>/file                                  the file (Range requests, for scrubbing)
 //   GET  /r/<token>/data                                  review, task and notes as JSON
-//   POST /r/<token>/notes                                 a note, at a timecode with a still or on a quoted passage
+//   POST /r/<token>/notes                                 a note, at a timecode with a still or on a quoted passage (from these pages only)
 //   GET  /r/<token>/still/<name>                          a commented frame
-//   POST /r/<token>/decision                              approve / request changes
+//   POST /r/<token>/decision                              approve / request changes (from these pages only, or Bearer UPLOAD_TOKEN)
 //
+// Notes and decisions are taken only from Control Center's own pages (review-shared.ts `fromOwnPage`).
 // The link is the access control (a long random token), which is fine for the owner and their team; the team
 // key in the path is only there so a link says whose work it is, and is ignored when matching. Notes
 // are stored already delivered; the decision is posted to the task as one comment listing them, so a
@@ -24,7 +25,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { addToNamedBatch } from "./batch";
-import { database, escapeHtml, json, mayUpload, PAGE_HEADERS, randomToken, reviewPath, teamKey, tokenOf, type ReviewEnv } from "./review-shared";
+import { database, escapeHtml, fromOwnPage, json, mayUpload, PAGE_HEADERS, randomToken, reviewPath, teamKey, tokenOf, type ReviewEnv } from "./review-shared";
 
 export type { ReviewEnv };
 
@@ -74,8 +75,10 @@ export async function handleReview(request: Request, env: ReviewEnv): Promise<Re
   }
   if (rest === "/file") return serveObject(request, env, review.object_key, review.content_type);
   if (rest === "/data") return data(db, review);
-  if (rest === "/notes" && request.method === "POST") return addNote(request, env, db, review);
-  if (rest === "/decision" && request.method === "POST") return decide(request, db, review);
+  if ((rest === "/notes" || rest === "/decision") && request.method === "POST") {
+    if (!(await fromOwnPage(request, env))) return json({ error: "Notes and decisions are accepted only from Control Center's own pages." }, 403);
+    return rest === "/notes" ? addNote(request, env, db, review) : decide(request, db, review);
+  }
   const still = rest.match(/^\/still\/([a-f0-9-]+\.jpg)$/);
   if (still) return serveObject(request, env, `${review.object_key.replace(/\/[^/]+$/, "")}/stills/${still[1]}`, "image/jpeg");
   return new Response("Not found", { status: 404 });

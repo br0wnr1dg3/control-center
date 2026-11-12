@@ -29,6 +29,18 @@ async function tokenMatches(given: string, expected: string) {
 export const mayUpload = (request: Request, env: ReviewEnv) =>
   tokenMatches(request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? "", env.UPLOAD_TOKEN);
 
+// Notes and decisions are a reviewer's, made on Control Center's own pages: a link alone lets you read a review,
+// not write to it from anywhere. A browser says where a POST comes from (Origin, Sec-Fetch-Site), and a document
+// with no origin of its own, as a sandboxed HTML review is, says "null". Whatever a browser says has to be this
+// site. A request that says nothing isn't a browser's, and needs the upload token as publishing does.
+export async function fromOwnPage(request: Request, env: ReviewEnv): Promise<boolean> {
+  const origin = request.headers.get("Origin"), site = request.headers.get("Sec-Fetch-Site");
+  if (origin === null && site === null) return mayUpload(request, env);
+  const own = [new URL(request.url).origin];
+  try { own.push(new URL(env.PUBLIC_URL).origin); } catch { /* not set: the request's own address is the only one */ }
+  return (origin === null || own.includes(origin)) && (site === null || site === "same-origin");
+}
+
 export async function teamKey(db: SupabaseClient, taskId: number): Promise<string | null> {
   const { data } = await db.from("tasks").select("team:teams(key)").eq("id", taskId).maybeSingle();
   return (data?.team as { key?: string } | null)?.key ?? null;
