@@ -172,7 +172,9 @@ final class BoardStore {
             async let tm = api.fetchTeams()
             async let p = api.fetchProjects()
             async let r = api.fetchRepos()
-            let (fresh, items, freshTeams, specs, repos) = try await (t, i, tm, p, r)
+            let (fresh, all, freshTeams, specs, repos) = try await (t, i, tm, p, r)
+            // FYI notes drowned out what needs you: leave them out of the inbox, its counts and notifications.
+            let items = all.filter(\.needsYou)
             localRepos = repos
             notifyNew(items)
             allTasks = fresh
@@ -496,7 +498,7 @@ final class BoardStore {
         let now = ISO8601DateFormatter().string(from: Date())
         inbox = inbox.map { item in
             ids.contains(item.id) && item.isUnread
-                ? InboxItem(id: item.id, kind: item.kind, body: item.body, readAt: now, createdAt: item.createdAt, task: item.task)
+                ? InboxItem(id: item.id, kind: item.kind, body: item.body, author: item.author, readAt: now, createdAt: item.createdAt, task: item.task)
                 : item
         }
         Task {
@@ -529,7 +531,7 @@ final class BoardStore {
     func markUnread(_ thread: InboxThread) {
         let id = thread.latest.id
         inbox = inbox.map { item in
-            item.id == id ? InboxItem(id: item.id, kind: item.kind, body: item.body, readAt: nil, createdAt: item.createdAt, task: item.task) : item
+            item.id == id ? InboxItem(id: item.id, kind: item.kind, body: item.body, author: item.author, readAt: nil, createdAt: item.createdAt, task: item.task) : item
         }
         Task {
             do { try await client().markUnread(ids: [id]) } catch { lastError = error.localizedDescription }
