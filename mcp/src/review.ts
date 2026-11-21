@@ -176,8 +176,16 @@ async function makeCurrent(request: Request, env: ReviewEnv) {
 // no allow-top-navigation, and a tab it opens onto this origin's HTML files is sandboxed again by this header.
 async function serveObject(request: Request, env: ReviewEnv, key: string, contentType: string | null) {
   const rangeHeader = request.headers.get("Range");
-  const object = await env.MEDIA.get(key, rangeHeader ? { range: request.headers } : undefined);
-  if (!object) return new Response("Not found", { status: 404 });
+  let object: R2ObjectBody | R2Object | null;
+  try {
+    object = await env.MEDIA.get(key, rangeHeader ? { range: request.headers } : undefined);
+  } catch (err) {
+    // R2 throws on a range past the end; a player asking for one wants 416 and the real size, not a 500.
+    const head = rangeHeader ? await env.MEDIA.head(key) : null;
+    if (!head) throw err;
+    return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${head.size}`, "Accept-Ranges": "bytes" } });
+  }
+  if (!object || !("body" in object)) return new Response("Not found", { status: 404 });
 
   const headers = new Headers();
   object.writeHttpMetadata(headers);
@@ -485,9 +493,18 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   button.small { font-size: 13px; padding: 3px 10px; }
   button:disabled { opacity: .5; cursor: default; }
   .time { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted); }
-  .track { position: relative; height: 14px; margin: 6px 0 0; border-radius: 7px; background: var(--line); cursor: pointer; }
+  /* Dragged with a finger as well as a mouse: touch-action keeps the page from scrolling instead, and the
+     invisible band above and below makes it easy to catch on a phone. */
+  .track { position: relative; height: 14px; margin: 14px 0 0; border-radius: 7px; background: var(--line); cursor: pointer; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  .track::before { content: ""; position: absolute; left: 0; right: 0; top: -12px; bottom: -12px; }
+  .track:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   .track .marker { position: absolute; top: 2px; width: 10px; height: 10px; margin-left: -5px; border-radius: 50%; background: var(--accent); }
-  .track .head { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text); }
+  .track .head { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text); pointer-events: none; }
+  .track .head::after { content: ""; position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: var(--text); transform: scale(0); transition: transform .1s; }
+  .track.scrubbing .head::after { transform: scale(1); }
+  .track .tip { position: absolute; bottom: 22px; padding: 2px 6px; border-radius: 6px; background: var(--text); color: var(--bg); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none; display: none; }
+  .track.scrubbing .tip { display: block; }
+  @media (pointer: coarse) { .track { height: 18px; border-radius: 9px; } .track .marker { top: 3px; width: 12px; height: 12px; margin-left: -6px; } }
   aside { display: flex; flex-direction: column; gap: 12px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
   textarea { width: 100%; font: inherit; padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); resize: vertical; min-height: 64px; }
@@ -576,7 +593,7 @@ const REVIEW_PAGE = String.raw`<!doctype html>
     <div id="newer" hidden><span id="newerText"></span><a id="newerOpen" href="#"></a></div>
     <div class="stage" id="stage"></div>
     <div id="videoControls" hidden>
-      <div class="track" id="track"><div class="head" id="head"></div></div>
+      <div class="track" id="track" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0"><div class="head" id="head"></div><div class="tip" id="tip"></div></div>
       <div class="controls">
         <button id="back5" title="Back 5 seconds (←)">−5s</button>
         <button id="back" title="Previous frame (,)">◀ Frame</button>
@@ -811,7 +828,7 @@ function render() {
     for (const n of notes) if (n.timecode !== null) {
       const m = document.createElement("div");
       m.className = "marker"; m.style.left = (100 * n.timecode / video.duration) + "%"; m.title = n.body;
-      m.onclick = (e) => { e.stopPropagation(); video.pause(); video.currentTime = n.timecode; };
+      m.dataset.t = n.timecode; // a tap on it seeks there; see the track's pointer handlers
       $("track").appendChild(m);
     }
   }
@@ -997,10 +1014,17 @@ function setupMedia(type, filename) {
     $("stage").appendChild(video); $("videoControls").hidden = false;
     $("noteLabel").textContent = "Note at 0:00.0";
     $("body").placeholder = "What should change? (Enter adds it; pause on the frame first)";
+    const track = $("track");
+    // While a finger or mouse drags the timeline, the time shown is where it is, not where the video has got to.
+    let scrub = null;
     const tick = () => {
-      $("clock").textContent = fmt(video.currentTime) + " / " + fmt(video.duration || 0);
-      $("noteLabel").textContent = "Note at " + fmt(video.currentTime);
-      $("head").style.left = (100 * video.currentTime / (video.duration || 1)) + "%";
+      const t = scrub ? scrub.t : video.currentTime, d = video.duration || 0, pct = (100 * t / (d || 1)) + "%";
+      $("clock").textContent = fmt(t) + " / " + fmt(d);
+      $("noteLabel").textContent = "Note at " + fmt(t);
+      $("head").style.left = pct;
+      // Shifted by its own share so it stays on screen at either end.
+      $("tip").style.left = pct; $("tip").style.transform = "translateX(-" + pct + ")"; $("tip").textContent = fmt(t) + " / " + fmt(d);
+      track.setAttribute("aria-valuemax", d.toFixed(1)); track.setAttribute("aria-valuenow", t.toFixed(1)); track.setAttribute("aria-valuetext", fmt(t));
       $("play").textContent = video.paused ? "Play" : "Pause";
     };
     video.addEventListener("timeupdate", tick); video.addEventListener("seeked", tick);
@@ -1030,7 +1054,38 @@ function setupMedia(type, filename) {
     $("full").onclick = full;
     const fullLabel = () => { $("full").textContent = document.fullscreenElement || document.webkitFullscreenElement ? "Exit full screen" : "Full screen"; };
     document.addEventListener("fullscreenchange", fullLabel); document.addEventListener("webkitfullscreenchange", fullLabel);
-    $("track").onclick = (e) => { const r = $("track").getBoundingClientRect(); video.currentTime = (e.clientX - r.left) / r.width * video.duration; };
+    // Scrubbing. Pointer events cover mouse, touch and pen alike, and capture keeps the drag going when the
+    // finger leaves the thin bar. A phone decodes slowly, so seeks don't queue: while one is in flight only
+    // the latest position is kept, and it's sought when that one lands.
+    let pendingSeek = null;
+    const seekTo = (t) => { if (video.seeking) pendingSeek = t; else { pendingSeek = null; video.currentTime = t; } };
+    video.addEventListener("seeked", () => { if (pendingSeek !== null) { const t = pendingSeek; pendingSeek = null; video.currentTime = t; } });
+    const timeAt = (x) => { const r = track.getBoundingClientRect(); return Math.max(0, Math.min(1, (x - r.left) / r.width)) * video.duration; };
+    const endScrub = (e, cancelled) => {
+      if (!scrub || e.pointerId !== scrub.id) return;
+      const s = scrub; scrub = null; track.classList.remove("scrubbing");
+      // A tap on a note's marker goes to the note's exact frame and stays there, as clicking it always has.
+      const onMarker = !cancelled && s.marker && !s.moved;
+      pendingSeek = null; video.currentTime = onMarker ? Number(s.marker.dataset.t) : s.t;
+      if (s.wasPlaying && !onMarker) video.play();
+      tick();
+    };
+    track.addEventListener("pointerdown", (e) => {
+      if (!video.duration || e.button > 0 || scrub) return;
+      e.preventDefault();
+      track.setPointerCapture(e.pointerId);
+      scrub = { id: e.pointerId, x: e.clientX, moved: false, t: timeAt(e.clientX), wasPlaying: !video.paused, marker: e.target.closest(".marker") };
+      video.pause(); track.classList.add("scrubbing"); seekTo(scrub.t); tick();
+    });
+    track.addEventListener("pointermove", (e) => {
+      if (!scrub || e.pointerId !== scrub.id) return;
+      if (Math.abs(e.clientX - scrub.x) > 4) scrub.moved = true;
+      if (!scrub.moved) return;
+      scrub.t = timeAt(e.clientX); seekTo(scrub.t); tick();
+    });
+    track.addEventListener("pointerup", (e) => endScrub(e, false));
+    track.addEventListener("pointercancel", (e) => endScrub(e, true));
+    track.addEventListener("lostpointercapture", (e) => endScrub(e, true));
     document.addEventListener("keydown", (e) => {
       if (/^(TEXTAREA|INPUT|SELECT)$/.test(e.target.tagName)) return;
       if (e.key === " ") { e.preventDefault(); video.paused ? video.play() : video.pause(); }
