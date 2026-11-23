@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
+import { reviewListUrl } from "./review-list";
 import { deliverWebhooks } from "./webhooks";
 
 const kind = z.enum(["human", "agent", "either"]);
@@ -598,7 +599,8 @@ export function buildServer(env: Env) {
     {
       description:
         "A team's briefing (context), GitHub org, working folder, projects with their specs, and local_repos: every repo " +
-        `checked out on ${o}'s Mac (name, GitHub, description, aliases). Use a local_repos name as a task's repo.`,
+        `checked out on ${o}'s Mac (name, GitHub, description, aliases). Use a local_repos name as a task's repo. ` +
+        `reviews_url is the team's private review list: a table of everything sent for review, for ${o} and whoever ${o} gives it to.`,
       inputSchema: z.object({ team: teamRef }),
       annotations: { readOnlyHint: true },
     },
@@ -615,7 +617,8 @@ export function buildServer(env: Env) {
         .eq("id", id)
         .eq("local_repos.hidden", false)
         .single();
-      return error ? fail(error.message) : ok(data);
+      if (error) return fail(error.message);
+      return ok({ ...data, reviews_url: await reviewListUrl(db, env.PUBLIC_URL, { id, key: data.key }) });
     },
   );
 

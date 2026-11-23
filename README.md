@@ -282,6 +282,17 @@ Making one:
 
 To test locally: `CC_SUPABASE_URL=http://127.0.0.1:57721 CC_SERVICE_KEY=<demo key> CC_UPLOAD_TOKEN=<UPLOAD_TOKEN in .dev.vars> node --test mcp/test/` (batches and versions), with `wrangler dev` running. The smoke script covers the same flow when `CC_UPLOAD_TOKEN` is set.
 
+### The review list (`mcp/src/review-list.ts`)
+
+Each team has one private link, `/reviews/<team>/<token>`, to a plain table of everything sent for review on its tasks: project, title, kind, version, status (Waiting, Changes requested, Approved), when it was sent, when and by whom it was decided, and the task. A cut with several versions is one row, its current version, so a superseded version is never a row. Clicking a row opens that review's own page; nothing is decided from the table.
+
+- **Order and filter.** Unsorted, it is a queue: what is waiting first, longest wait at the top, then what was decided, latest decision first. A heading sorts by its column (ascending, then descending, then back to the queue), and the control in the bar shows what is **Waiting** (the default) or **All**. Both are remembered on the device. Everything waiting is listed; of the decided, the latest 500.
+- **It keeps up.** The table is read again whenever its tab is looked at again, and every 25 seconds while it is on screen, so a decision made on a review page shows without a reload.
+- **Getting the link.** `get_team` returns it as `reviews_url`. The token is the team's row in `review_lists`, made in the database for every team; `update review_lists set token = default where team_id = <id>` replaces it, and the old link stops working.
+- **Who can open it.** The list names every review link the team has, so only its own link opens it: a review link or a batch link doesn't lead to it, and nothing served at those addresses mentions it. The review page's **All reviews** link, and the "Back to all reviews" offered after a decision, come from the browser: the list leaves its address in that browser's storage, so they appear only for someone who has already opened the list there.
+
+`node --test mcp/test/review-list.test.mjs` checks the row shaping and the ordering; it needs no database or Worker.
+
 ## Runner (`runner/`)
 
 Polls every 20s. Only tasks with `kind = agent` **and** `status = ready` are started, so moving a task to ready (directly or via `plan_today`) is the approval step.

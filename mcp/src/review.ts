@@ -9,6 +9,7 @@
 //   POST /r/<token>/notes                                 a note, at a timecode with a still or on a quoted passage (from these pages only)
 //   GET  /r/<token>/still/<name>                          a commented frame
 //   POST /r/<token>/decision                              approve / request changes (from these pages only, or Bearer UPLOAD_TOKEN)
+//   (review-list.ts)                                      /reviews/<team>/<token>: each team's table of its reviews
 //
 // Notes and decisions are taken only from Control Center's own pages (review-shared.ts `fromOwnPage`).
 // The link is the access control (a long random token), which is fine for the owner and their team; the team
@@ -465,6 +466,9 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   .barRight { flex: none; display: flex; align-items: center; gap: 6px; }
   .bar h1 { font-size: 14px; font-weight: 600; margin: 0; flex: 0 1 auto; min-width: 48px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #task { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* The way back to the team's review list, for a browser that has been there (see load). */
+  .back { flex: none; font-size: 12.5px; color: var(--muted); text-decoration: none; white-space: nowrap; padding: 3px 2px; border-radius: 5px; }
+  .back:hover { color: var(--text); }
   .chip { flex: none; padding: 3px 6px 3px 9px; font-weight: 600; gap: 3px; }
   .chip svg { color: var(--muted); }
   .badge { flex: none; font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--line); white-space: nowrap; }
@@ -636,6 +640,7 @@ const REVIEW_PAGE = String.raw`<!doctype html>
 </style>
 <header class="bar">
   <div class="barLeft">
+    <a id="allReviews" class="back" href="#" hidden>‹ All reviews</a>
     <h1 id="title">__TITLE__</h1>
     <button id="versionBtn" class="chip" aria-haspopup="true" aria-expanded="false" hidden><span id="versionName"></span><span data-icon="chevron"></span></button>
     <span id="status" class="badge"></span>
@@ -724,7 +729,7 @@ const REVIEW_PAGE = String.raw`<!doctype html>
 <script>
 // The version on screen. A video's versions swap in place, so this changes without a page load.
 let token = "__TOKEN__", base = "/r/" + token;
-let review = null, chain = [];
+let review = null, chain = [], listPath = null;
 const FPS = 30;
 const $ = (id) => document.getElementById(id);
 const fmt = (s) => Math.floor(s / 60) + ":" + (s % 60).toFixed(1).padStart(4, "0");
@@ -802,9 +807,11 @@ $("othersBtn").onclick = () => togglePop($("othersMenu"), $("othersBtn"));
 $("help").onclick = () => togglePop($("keys"), $("help"));
 
 let toastTimer = 0;
-function toast(text) {
+function toast(text, back) {
   $("toast").textContent = text; $("toast").hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => { $("toast").hidden = true; }, 6000);
+  // After a decision: the way back to the list, left up for longer since it is something to click.
+  if (back) { const a = document.createElement("a"); a.href = back; a.textContent = "Back to all reviews"; $("toast").append(" ", a); }
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { $("toast").hidden = true; }, back ? 12000 : 6000);
 }
 
 // ---------- Who is reviewing ----------
@@ -1117,7 +1124,7 @@ async function decide(decision, confirmed) {
   $("message").value = ""; closePop();
   const reply = await res.json();
   toast(decision !== "approve" ? "Sent. The agent is working on the next version."
-    : reply.completed_task ? "Approved. The task is done." : "Approved. The agent will wrap up.");
+    : reply.completed_task ? "Approved. The task is done." : "Approved. The agent will wrap up.", listPath);
   load();
 }
 
@@ -1382,6 +1389,12 @@ async function load() {
   $("status").textContent = { open: "Waiting for review", approved: "Approved", changes_requested: "Changes requested" }[review.status];
   $("status").className = "badge " + review.status;
   $("approve").title = review.completes_task ? "Approving completes this task" : "";
+  // The team's review list, if this browser has opened it: the list page leaves its address here. This page is
+  // never sent it, so a review link alone doesn't lead to the team's other reviews.
+  const list = team ? store.get("cc-review-list:" + team.key) : null;
+  listPath = list && /^\/reviews\/[a-z0-9-]+\/[A-Za-z0-9_-]{20,}$/.test(list) ? list : null;
+  $("allReviews").hidden = !listPath;
+  if (listPath) $("allReviews").href = listPath;
   $("task").textContent = (team ? team.name + " · " : "") + "CC-" + d.task.id + " · " + d.task.title; $("task").title = $("task").textContent;
   // What else is on the task, as a menu in the bar.
   $("othersBtn").hidden = !d.others.length;
