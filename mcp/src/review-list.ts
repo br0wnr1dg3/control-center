@@ -47,23 +47,26 @@ export async function handleReviewList(request: Request, env: ReviewEnv): Promis
   return new Response("Not found", { status: 404 });
 }
 
-// Everything waiting is listed; of what was decided, the latest of these many.
+// How many rows of each kind the table takes: the longest-waiting, and the latest decisions. One more is asked
+// for, to know whether any were left out. (Both stay under PostgREST's own cap of 1000 rows a request.)
+const WAITING_SHOWN = 800;
 const DECIDED_SHOWN = 500;
 const COLUMNS = "token,title,status,decided_by,decided_at,content_type,object_key,created_at,version,tasks!inner(id,title,project,team_id)";
 
 async function data(db: SupabaseClient, team: Team) {
   const current = () => db.from("reviews").select(COLUMNS).eq("is_current", true).eq("tasks.team_id", team.id);
   const [waiting, decided] = await Promise.all([
-    current().eq("status", "open").order("created_at").returns<ListedReview[]>(),
-    current().neq("status", "open").order("decided_at", { ascending: false }).limit(DECIDED_SHOWN).returns<ListedReview[]>(),
+    current().eq("status", "open").order("created_at").limit(WAITING_SHOWN + 1).returns<ListedReview[]>(),
+    current().neq("status", "open").order("decided_at", { ascending: false }).limit(DECIDED_SHOWN + 1).returns<ListedReview[]>(),
   ]);
   const error = waiting.error ?? decided.error;
   if (error) return json({ error: error.message }, 500);
   return new Response(
     JSON.stringify({
       team: { key: team.key, name: team.name },
-      rows: shapeRows(team.key, [...waiting.data!, ...decided.data!]),
-      decided_cut_at: decided.data!.length === DECIDED_SHOWN ? DECIDED_SHOWN : null,
+      rows: shapeRows(team.key, [...waiting.data!.slice(0, WAITING_SHOWN), ...decided.data!.slice(0, DECIDED_SHOWN)]),
+      waiting_cut_at: waiting.data!.length > WAITING_SHOWN ? WAITING_SHOWN : null,
+      decided_cut_at: decided.data!.length > DECIDED_SHOWN ? DECIDED_SHOWN : null,
     }),
     { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } },
   );
@@ -151,11 +154,11 @@ const LIST_PAGE = String.raw`<!doctype html>
 const base = "/reviews/__TOKEN__", team = "__KEY__";
 const $ = (id) => document.getElementById(id);
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
-                set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+                set: (k, v) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} } };
 const HEADS = [["project", "Project"], ["title", "Title"], ["kind", "Kind"], ["version", "Version"], ["status", "Status"],
                ["sent", "Sent for review"], ["decided", "Decided"], ["task", "Task"]];
 const STATUS = { open: "Waiting", changes_requested: "Changes requested", approved: "Approved" };
-const REFRESH_MS = 25000;
+const REFRESH_MS = 25000, TIMEOUT_MS = 15000;
 
 // The review page offers the way back to whoever has been here (it is told nothing about this address otherwise).
 store.set("cc-review-list:" + team, location.pathname);
@@ -168,7 +171,8 @@ try {
 } catch {}
 const keep = () => store.set("cc-review-list-view:" + team, JSON.stringify(view));
 
-let rows = null, cut = null, failed = false;
+// cut: how many rows each side was held to, when some were left out. gone: the link was replaced.
+let rows = null, cut = { waiting: null, decided: null }, failed = false, gone = false;
 
 function el(tag, text, cls) {
   const node = document.createElement(tag);
@@ -188,8 +192,9 @@ function ago(iso) {
   const min = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
   if (min < 1) return "just now";
   if (min < 60) return min + " min ago";
-  if (min < 60 * 24) return Math.round(min / 60) + " h ago";
-  const days = Math.round(min / (60 * 24));
+  const hours = Math.round(min / 60);
+  if (hours < 24) return hours + " h ago";
+  const days = Math.max(1, Math.round(min / (60 * 24)));
   return days + (days === 1 ? " day ago" : " days ago");
 }
 
@@ -215,7 +220,8 @@ function rowOf(r) {
   tr.appendChild(el("td", "v" + r.version, "num"));
   tr.appendChild(el("td")).appendChild(el("span", STATUS[r.status] || r.status, "badge " + r.status));
   const sent = tr.appendChild(el("td", null, "num"));
-  sent.append(el("span", day(r.sent_at)), el("span", ago(r.sent_at), "muted"));
+  sent.append(el("span", day(r.sent_at)), el("span", ago(r.sent_at), "muted age"));
+  sent.lastChild.dataset.at = r.sent_at;
   const decided = tr.appendChild(el("td", null, "num"));
   if (r.decided_at) decided.append(el("span", day(r.decided_at)), el("span", r.decided_by ? "by " + r.decided_by : "", "muted"));
   else decided.appendChild(el("span", "—", "muted")).style.marginLeft = "0";
@@ -231,12 +237,19 @@ function render() {
     if (on) th.setAttribute("aria-sort", view.dir === 1 ? "ascending" : "descending"); else th.removeAttribute("aria-sort");
     th.querySelector(".arrow").textContent = on ? (view.dir === 1 ? "▲" : "▼") : "";
   }
+  const left = [cut.waiting ? "the " + cut.waiting + " longest-waiting reviews" : "", cut.decided && view.filter === "all" ? "the " + cut.decided + " most recent decisions" : ""].filter(Boolean);
   $("state").className = failed ? "err" : "muted";
-  $("state").textContent = failed ? "Couldn't " + (rows ? "refresh" : "load") + " the list. Trying again shortly."
-    : cut && view.filter === "all" ? "Showing everything waiting and the " + cut + " most recent decisions." : "";
+  $("state").textContent = gone ? "" : failed ? "Couldn't " + (rows ? "refresh" : "load") + " the list. Trying again shortly."
+    : left.length ? "The list is cut short: showing " + left.join(" and ") + "." : "";
+  if (gone) {
+    $("nWaiting").textContent = ""; $("nAll").textContent = "";
+    $("rows").replaceChildren();
+    $("empty").hidden = false; $("empty").textContent = "This list link no longer works.";
+    return;
+  }
   if (!rows) return;
   const waiting = shownRows(rows, "waiting").length;
-  $("nWaiting").textContent = waiting; $("nAll").textContent = rows.length + (cut ? "+" : "");
+  $("nWaiting").textContent = waiting; $("nAll").textContent = rows.length + (cut.waiting || cut.decided ? "+" : "");
   const shown = sortRows(shownRows(rows, view.filter), view);
   // A refresh mustn't take the keyboard's place in the table.
   const focused = document.activeElement && document.activeElement.closest ? document.activeElement.closest("#rows a") : null;
@@ -266,26 +279,37 @@ $("rows").addEventListener("click", (e) => {
 
 // Decisions are made on the review pages, so the table is read again whenever someone comes back to this tab,
 // and every so often while it is on screen.
-let loading = false, last = 0;
+let loading = false, last = 0, signature = null;
 async function load() {
   if (loading) return;
   loading = true;
   try {
-    const res = await fetch(base + "/data", { cache: "no-store" });
-    if (!res.ok) throw new Error(String(res.status));
-    const d = await res.json();
-    rows = d.rows; cut = d.decided_cut_at; last = Date.now(); failed = false;
+    // A connection that stalls is given up on, so the next refresh isn't held behind it.
+    const res = await fetch(base + "/data", { cache: "no-store", signal: AbortSignal.timeout(TIMEOUT_MS) });
+    if (res.status === 404) {
+      // The link was replaced: nothing more will come from it, and the review page shouldn't offer it.
+      gone = true; rows = []; clearInterval(timer);
+      if (store.get("cc-review-list:" + team) === location.pathname) store.set("cc-review-list:" + team, null);
+    } else {
+      if (!res.ok) throw new Error(String(res.status));
+      const text = await res.text(), wasFailed = failed;
+      failed = false; last = Date.now();
+      // Nothing changed: the rows stay as they are (a selection or a click under way isn't disturbed), only their ages move on.
+      if (text === signature && !wasFailed) { loading = false; for (const age of $("rows").querySelectorAll(".age")) { const now = ago(age.dataset.at); if (age.textContent !== now) age.textContent = now; } return; }
+      const d = JSON.parse(text);
+      rows = d.rows; cut = { waiting: d.waiting_cut_at, decided: d.decided_cut_at }; signature = text;
+    }
   } catch {
     failed = true;
   }
   loading = false;
   render();
 }
-const seen = () => { if (!document.hidden && Date.now() - last > 1000) load(); };
+const seen = () => { if (!gone && !document.hidden && Date.now() - last > 1000) load(); };
 document.addEventListener("visibilitychange", seen);
 addEventListener("focus", seen);
-addEventListener("pageshow", (e) => { if (e.persisted) load(); });
-setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
+addEventListener("pageshow", (e) => { if (e.persisted && !gone) load(); });
+const timer = setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
 render();
 load();
 </script>
