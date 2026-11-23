@@ -459,7 +459,9 @@ const REVIEW_PAGE = String.raw`<!doctype html>
 
   /* ---- Top bar ---- */
   .bar { flex: none; display: flex; align-items: center; gap: 12px; padding: 8px 12px; min-height: 49px; background: var(--panel); border-bottom: 1px solid var(--line); }
-  .barLeft { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; }
+  /* The left side gives way first: the title and the task line shorten, and what still doesn't fit is cut off
+     at the right rather than painted under the buttons. (The padding leaves room for focus rings.) */
+  .barLeft { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; overflow: hidden; padding: 3px; margin: -3px; }
   .barRight { flex: none; display: flex; align-items: center; gap: 6px; }
   .bar h1 { font-size: 14px; font-weight: 600; margin: 0; flex: 0 1 auto; min-width: 48px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #task { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -469,6 +471,16 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   .badge.approved { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
   .badge.changes_requested { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
   #openFull { white-space: nowrap; margin-right: 4px; }
+  /* The lesser actions sit in the bar while there is room. When there isn't (script sets "compact"), they fold
+     into a menu behind the More button, so the two decisions are always on screen. */
+  #moreBtn { display: none; }
+  #extras { display: flex; align-items: center; gap: 6px; }
+  body:not(.compact) #extras[hidden] { display: flex !important; }
+  body.compact #moreBtn { display: inline-flex; }
+  body.compact #extras { position: fixed; z-index: 30; left: 8px; top: 8px; flex-direction: column; align-items: stretch; gap: 2px; min-width: 190px; padding: 6px;
+                         background: var(--raise); border: 1px solid var(--edge); border-radius: 8px; box-shadow: 0 12px 32px rgba(0, 0, 0, .55); }
+  body.compact #extras > * { display: flex; align-items: center; gap: 8px; margin: 0; padding: 7px 9px; border: 0; border-radius: 6px; background: none; color: var(--text); font-size: 13px; text-decoration: none; }
+  body.compact #extras > *:hover { background: var(--hover); }
 
   /* ---- Popovers: the version list, speed, shortcuts and the decision. Placed by script under (or over) their button. ---- */
   .pop { position: fixed; z-index: 30; left: 8px; top: 8px; background: var(--raise); border: 1px solid var(--edge); border-radius: 8px; box-shadow: 0 12px 32px rgba(0, 0, 0, .55);
@@ -572,7 +584,6 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   #notes .empty { margin: 0; padding: 14px; }
   .note { display: flex; gap: 10px; padding: 10px 14px 10px 12px; border-bottom: 1px solid var(--line); border-left: 2px solid transparent; }
   .note > div { min-width: 0; flex: 1; }
-  .note.seek { cursor: pointer; }
   .note:hover { background: rgba(255, 255, 255, .03); }
   .note.now { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .note.on { background: color-mix(in srgb, var(--mark) 50%, transparent); }
@@ -604,13 +615,13 @@ const REVIEW_PAGE = String.raw`<!doctype html>
     .bar h1 { max-width: 100%; }
     #task { flex: 1 1 120px; }
     .barRight { flex: 1 1 100%; }
-    .barRight .label, #help { display: none; }
+    #help { display: none; }
     main { display: block; }
     .stage { min-height: 96px; }
     .stage video { height: auto; max-height: 62vh; max-height: 62dvh; }
     #player:fullscreen .stage video { height: 100%; max-height: none; }
     img.media { max-height: 70vh; }
-    body.wide .stage { height: 80vh; }
+    body.wide .stage { flex: none; height: 80vh; }
     body.text .stage { overflow: visible; padding: 12px 8px; }
     #videoControls { padding: 2px 4px 6px; }
     .transport { gap: 0; }
@@ -633,10 +644,13 @@ const REVIEW_PAGE = String.raw`<!doctype html>
     <span id="task" class="muted"></span>
   </div>
   <div class="barRight">
-    <a id="openFull" class="muted" href="/r/__TOKEN__/file" target="_blank" rel="noopener" hidden>Open on its own ↗</a>
-    <button id="toggle" hidden>Hide comments</button>
-    <a id="download" class="btn" href="/r/__TOKEN__/file" download title="Download the file" data-icon="download"><span class="label">Download</span></a>
-    <button id="copy" title="Copy this version's link" data-icon="link"><span class="label">Copy link</span></button>
+    <button id="moreBtn" class="ib" aria-haspopup="true" aria-expanded="false" aria-label="More actions" title="More actions" data-icon="more"></button>
+    <div id="extras" hidden>
+      <a id="openFull" class="muted" href="/r/__TOKEN__/file" target="_blank" rel="noopener" hidden>Open on its own ↗</a>
+      <button id="toggle" hidden>Hide comments</button>
+      <a id="download" class="btn" href="/r/__TOKEN__/file" download title="Download the file" data-icon="download"><span class="label">Download</span></a>
+      <button id="copy" title="Copy this version's link" data-icon="link"><span class="label">Copy link</span></button>
+    </div>
     <button id="help" class="ib" aria-haspopup="true" aria-expanded="false" aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)" hidden><strong>?</strong></button>
     <span class="spacer"></span>
     <button class="warn" id="changes" aria-haspopup="dialog" aria-expanded="false">Request changes</button>
@@ -738,6 +752,7 @@ const ICON = {
   link: svg('<path d="M6.5 9.5l3-3M7.2 4.6l.9-.9a2.6 2.6 0 0 1 3.7 3.7l-.9.9M8.8 11.4l-.9.9a2.6 2.6 0 0 1-3.7-3.7l.9-.9"/>'),
   chevron: svg('<path d="M4.5 6.5L8 10l3.5-3.5"/>'),
   send: svg('<path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/>'),
+  more: svg('<circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/>', true),
 };
 const setIcon = (el, icon) => { el.innerHTML = ICON[icon]; };
 document.querySelectorAll("[data-icon]").forEach((el) => el.insertAdjacentHTML("afterbegin", ICON[el.dataset.icon]));
@@ -770,6 +785,18 @@ const togglePop = (pop, anchor, above) => (isOpen(pop) ? closePop() : showPop(po
 document.addEventListener("pointerdown", (e) => { if (popped && !popped.pop.contains(e.target) && !popped.anchor.contains(e.target)) closePop(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && popped) { const a = popped.anchor; closePop(); a.focus(); } });
 addEventListener("resize", placePop);
+// A click inside an HTML review's frame never reaches this page; the window losing focus to it is the sign.
+addEventListener("blur", closePop);
+// Whether the lesser actions fold into the More menu. An HTML page or PDF has two more of them, so it folds sooner.
+function fit() {
+  const compact = innerWidth <= (mode === "page" ? 1280 : 1100);
+  if (compact === document.body.classList.contains("compact")) return;
+  if (isOpen($("extras"))) closePop();
+  document.body.classList.toggle("compact", compact);
+}
+addEventListener("resize", fit); fit();
+$("moreBtn").onclick = () => togglePop($("extras"), $("moreBtn"));
+$("extras").addEventListener("click", () => { if (isOpen($("extras"))) closePop(); });
 $("versionBtn").onclick = () => togglePop($("versionMenu"), $("versionBtn"));
 $("othersBtn").onclick = () => togglePop($("othersMenu"), $("othersBtn"));
 $("help").onclick = () => togglePop($("keys"), $("help"));
@@ -959,8 +986,8 @@ function render() {
   $("count").textContent = "Comments (" + notes.length + ")";
   $("notes").innerHTML = list.length ? "" : '<p class="muted empty">No comments yet.</p>';
   for (const n of list) {
-    const el = document.createElement("div"), timed = Boolean(video) && n.timecode !== null;
-    el.className = "note" + (timed ? " seek" : ""); el.dataset.id = n.id;
+    const el = document.createElement("div");
+    el.className = "note"; el.dataset.id = n.id;
     const missing = doc && n.at === null;
     el.innerHTML = '<div><div class="noteHead"><span class="author">' + esc(n.author_name || n.author) + '</span>' +
       (n.timecode !== null ? '<button class="tc" title="Go to this frame">' + fmt(n.timecode) + '</button>' : "") +
@@ -968,8 +995,10 @@ function render() {
       (n.quote ? '<div class="quote' + (missing ? ' missing" title="Not found in this version' : "") + '">“' + esc(n.quote) + '”</div>' : "") +
       '<div class="noteBody">' + esc(n.body) + '</div></div>' +
       (n.still_url ? '<img src="' + n.still_url + '" alt="" title="The frame this comment is on">' : "");
-    // Anywhere on a timed comment goes to its frame, as its timecode and its still do.
-    if (timed) el.addEventListener("click", () => { video.pause(); video.currentTime = n.timecode; focusNote(n.id, false); });
+    // The timecode and the still go to the comment's frame; the text is left alone, so it can be selected.
+    const seek = () => { if (video && n.timecode !== null) { video.pause(); video.currentTime = n.timecode; focusNote(n.id, false); } };
+    el.querySelector(".tc")?.addEventListener("click", seek);
+    el.querySelector("img")?.addEventListener("click", seek);
     if (!missing) el.querySelector(".quote")?.addEventListener("click", () => focusNote(n.id, true));
     $("notes").appendChild(el);
   }
@@ -986,7 +1015,8 @@ function render() {
   markNow(true);
 }
 
-// The comment the video has most recently reached is lit, in the list and on the timeline, as it plays.
+// The comment the video has most recently reached is lit, in the list and on the timeline, as it plays. The list
+// isn't scrolled to it: that happens only when a marker or a timecode is clicked, so reading isn't interrupted.
 let nowId = null;
 function markNow(again) {
   if (!video) return;
@@ -998,8 +1028,6 @@ function markNow(again) {
   document.querySelectorAll(".now").forEach((el) => el.classList.remove("now"));
   if (id === null) return;
   document.querySelectorAll('.note[data-id="' + id + '"], .marker[data-id="' + id + '"]').forEach((el) => el.classList.add("now"));
-  const el = document.querySelector('.note[data-id="' + id + '"]');
-  if (el && !again) reveal(el);
 }
 
 function still() {
@@ -1011,18 +1039,22 @@ function still() {
   return c.toDataURL("image/jpeg", 0.8);
 }
 
+let sending = false; // Enter pressed twice sends once
 async function add() {
   const body = $("body").value.trim();
-  if (!body) return;
+  if (!body || sending) return;
   const who = nameFrom($("nameInput"));
   $("addState").className = "muted";
   if (!who) { $("addState").textContent = "Add your name to send."; return; }
-  $("add").disabled = true; $("addState").textContent = "Saving…";
+  sending = true; $("add").disabled = true; $("addState").textContent = "Saving…";
   const payload = { name: who, body };
   if (video) { payload.timecode = video.currentTime; payload.still = still(); }
   if (pending) { payload.quote = pending.quote; payload.quote_start = pending.start; }
-  const res = await fetch(base + "/notes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-  $("add").disabled = false;
+  let res;
+  try { res = await fetch(base + "/notes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); }
+  catch { res = null; }
+  sending = false; $("add").disabled = false;
+  if (!res) { $("addState").className = "muted err"; $("addState").textContent = "Couldn't save: no connection."; return; }
   if (!res.ok) { $("addState").className = "muted err"; $("addState").textContent = "Couldn't save: " + (await res.text()); return; }
   if (!res.url.endsWith(base + "/notes")) return; // another version was opened meanwhile; it's saved on its own
   const saved = await res.json();
@@ -1173,6 +1205,7 @@ $("copy").onclick = async () => {
 function setupMedia(type, filename) {
   const src = base + "/file";
   mode = kindOf(type, filename);
+  fit();
   if (mode === "video") {
     document.body.classList.add("video");
     video = document.createElement("video");
@@ -1206,10 +1239,12 @@ function setupMedia(type, filename) {
     const toggle = () => { if (!video.paused) return video.pause(); const p = video.play(); if (p) p.catch(() => {}); };
     $("play").onclick = toggle;
     video.addEventListener("click", toggle);
-    const step = (d) => { video.pause(); video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + d / FPS)); };
+    // Nothing to step or jump through until the length is known.
+    const ready = () => Number.isFinite(video.duration);
+    const step = (d) => { if (!ready()) return; video.pause(); video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + d / FPS)); };
     $("back").onclick = () => step(-1); $("fwd").onclick = () => step(1);
     // Unlike a frame step, a jump leaves a playing video playing.
-    const jump = (s) => { video.currentTime = Math.max(0, Math.min(video.duration || 0, video.currentTime + s)); };
+    const jump = (s) => { if (ready()) video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + s)); };
     $("back5").onclick = () => jump(-5); $("fwd5").onclick = () => jump(5);
     // Looping, like speed and volume, belongs to the player, so it carries over when another version is swapped in.
     $("loop").onclick = () => { video.loop = !video.loop; $("loop").setAttribute("aria-pressed", String(video.loop)); };
