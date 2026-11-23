@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
+import { reviewListUrl } from "./review-list";
 import { deliverWebhooks } from "./webhooks";
 
 const kind = z.enum(["human", "agent", "either"]);
@@ -598,11 +599,18 @@ export function buildServer(env: Env) {
     {
       description:
         "A team's briefing (context), GitHub org, working folder, projects with their specs, and local_repos: every repo " +
-        `checked out on ${o}'s Mac (name, GitHub, description, aliases). Use a local_repos name as a task's repo.`,
-      inputSchema: z.object({ team: teamRef }),
+        `checked out on ${o}'s Mac (name, GitHub, description, aliases). Use a local_repos name as a task's repo. ` +
+        `Pass include_reviews_url only when ${o} asks for the reviews list link.`,
+      inputSchema: z.object({
+        team: teamRef,
+        include_reviews_url: z
+          .boolean()
+          .optional()
+          .describe(`Only when ${o} asks for the reviews list link: also return reviews_url, the team's private table of everything sent for review. It opens every review the team has, so it isn't returned otherwise; don't put it in tasks, comments or outputs`),
+      }),
       annotations: { readOnlyHint: true },
     },
-    async ({ team }) => {
+    async ({ team, include_reviews_url }) => {
       let id: number;
       try {
         id = await resolveTeam(db, team);
@@ -615,7 +623,9 @@ export function buildServer(env: Env) {
         .eq("id", id)
         .eq("local_repos.hidden", false)
         .single();
-      return error ? fail(error.message) : ok(data);
+      if (error) return fail(error.message);
+      if (!include_reviews_url) return ok(data);
+      return ok({ ...data, reviews_url: await reviewListUrl(db, env.PUBLIC_URL, { id, key: data.key }) });
     },
   );
 
