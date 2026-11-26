@@ -35,6 +35,14 @@ const CONFIG = {
   // and how long its screen must have been still before it's closed. Longer than a CI run: a session
   // waiting on a background command shows no spinner, so its screen looks idle.
   closeAfterMinutes: Number(process.env.CC_CLOSE_AFTER_MINUTES ?? 60),
+  // An unfinished session whose screen has been still this long is nudged, up to stallNudges times that
+  // far apart, and then handed to the owner (0 turns this off). Far longer than a tool call, which keeps
+  // a spinner drawing; but a session that ended its turn to wait on a background command looks just as
+  // still as one that stopped for nothing, so the nudge has to be harmless to the first kind. Screen
+  // changes within stallReplyMinutes of a nudge are the session answering it, not it back at work.
+  stallMinutes: Number(process.env.CC_STALL_MINUTES ?? 15),
+  stallNudges: Number(process.env.CC_STALL_NUDGES ?? 3),
+  stallReplyMinutes: Number(process.env.CC_STALL_REPLY_MINUTES ?? 3),
   cleanupEveryMinutes: Number(process.env.CC_CLEANUP_MINUTES ?? 10),
   repoSyncMinutes: Number(process.env.CC_REPO_SYNC_MINUTES ?? 10),
   updateMinutes: Number(process.env.CC_UPDATE_MINUTES ?? 10),
@@ -785,6 +793,80 @@ export async function waitingOnReview(tasks, workspaces, idleMinutes = CONFIG.re
   return waiting;
 }
 
+// ---------- Sessions that went quiet ----------
+
+// The hook only moves a task to needs_you when the agent's last message asks something. A session that
+// ends its turn on a progress note with nothing in the background to wake it would otherwise sit at
+// in_progress for good, with nobody told.
+
+export const stallNudge = (task, minutes) =>
+  `Runner check: this session has been quiet for ${Math.round(minutes)} minutes and CC-${task.id} isn't finished. If you're waiting on a background job, say so in one line and carry on when it finishes. Otherwise continue the task now. If you're blocked, ask with ask_human instead of stopping.`;
+
+export const stallQuestion = (minutes, nudges) =>
+  `The session went quiet ${Math.round(minutes)} minutes ago and ${nudges} nudge${nudges === 1 ? "" : "s"} didn't get it working again. Open the session or reply here to resume it.`;
+
+// What to do about one session this poll: nothing, nudge it, or hand it to the owner ("escalate").
+// `quiet` is how long its screen has been still; `nudges` is what this quiet stretch has had so far
+// ({ count, lastAt, since } in ms, or null) and comes back as it should be kept. `minutes` is how long
+// the stretch has lasted, for the message.
+export function stallAction({ task, hasWindow = true, pending = 0, quiet, nudges = null, now = Date.now() }, config = CONFIG) {
+  const { stallMinutes, stallNudges, stallReplyMinutes } = config;
+  const none = (kept) => ({ action: "none", nudges: kept });
+  if (!(stallMinutes > 0)) return none(null);
+  // Not ours to nudge: waiting on the owner or finished, waiting on a review (strictly false, so a
+  // database without the column counts as unknown), no window here, or comments about to wake it.
+  if (task.status !== "in_progress" || task.awaiting_review !== false || !hasWindow || pending > 0) return none(null);
+  if (!Number.isFinite(quiet)) return none(nudges); // the screen couldn't be read; typing would fail too
+
+  const minute = 60000;
+  const changed = now - quiet * minute;
+  // Any activity ends the stretch, except what directly follows a nudge: the typed nudge and a one-line
+  // answer to it change the screen too, and counting those would mean never reaching the owner.
+  if (nudges && changed > nudges.lastAt + stallReplyMinutes * minute) nudges = null;
+  if (quiet < stallMinutes) return none(nudges);
+  if (nudges && now - nudges.lastAt < stallMinutes * minute) return none(nudges);
+
+  const count = nudges?.count ?? 0;
+  const since = nudges?.since ?? changed;
+  const minutes = (now - since) / minute;
+  if (count < stallNudges) return { action: "nudge", minutes, nudges: { count: count + 1, lastAt: now, since } };
+  return { action: "escalate", minutes, count, nudges: null };
+}
+
+// Nudges per task, in memory only. A restarted runner starts every count (and every screen's stillness,
+// see `screens`) again, which only makes it slower to speak up, never quicker.
+const stalls = new Map();
+
+// Sample one in-progress session's screen and act on it. Returns what was done.
+export async function checkStalled(task, workspace, pending = 0, config = CONFIG) {
+  const quiet = await quietMinutes(workspace);
+  const { action, nudges, minutes, count } = stallAction({ task, pending, quiet, nudges: stalls.get(task.id) }, config);
+  if (nudges) stalls.set(task.id, nudges);
+  else stalls.delete(task.id);
+  if (action === "none") return action;
+
+  // The task as it is now, not as the poll read it: typing fires the session's `resumed` hook, which
+  // would pull a task that has just asked something back out of needs_you and drop its question.
+  const [fresh] = await db(`tasks?id=eq.${task.id}&select=status,awaiting_review`);
+  if (fresh?.status !== "in_progress" || fresh.awaiting_review !== false) {
+    stalls.delete(task.id);
+    return "none";
+  }
+
+  if (action === "nudge") {
+    await typeInto(workspace, stallNudge(task, minutes));
+    await addEvent(task.id, "note", `runner nudged the session (${nudges.count} of ${config.stallNudges}): its screen had been still for ${Math.round(minutes)} minutes`);
+    log(`nudged quiet CC-${task.id} (${nudges.count}/${config.stallNudges})`);
+    return action;
+  }
+  const question = stallQuestion(minutes, count);
+  const [moved] = await patchTask(task.id, { status: "needs_you", question }, "&status=eq.in_progress");
+  if (!moved) return "none";
+  await addEvent(task.id, "question", question);
+  log(`CC-${task.id} stayed quiet after ${count} nudge(s); handed to the owner`);
+  return action;
+}
+
 // How much of CC_MAX_CONCURRENT is taken: the in-progress tasks with a window on this machine, less
 // those waiting on a review. Only the first maxWaiting of them are free, so a pile of undecided reviews
 // can't keep an unbounded number of sessions open: past that, waiting sessions hold slots again.
@@ -836,6 +918,9 @@ export async function dispatch(tasks, workspaces) {
     lastWaiting = said;
   }
 
+  const inProgress = new Set(tasks.filter((t) => t.status === "in_progress").map((t) => t.id));
+  for (const id of stalls.keys()) if (!inProgress.has(id)) stalls.delete(id);
+
   for (const task of tasks) {
     const ws = workspaces.get(task.id);
     try {
@@ -858,6 +943,7 @@ export async function dispatch(tasks, workspaces) {
             await markDelivered(pending);
             log(`delivered ${pending.length} comment(s) to CC-${task.id}`);
           }
+          await checkStalled(task, ws, pending.length);
         } else if (task.session_id) {
           // Runner-owned session whose window is gone: park it for the owner instead of looping.
           const question = "The session window closed before the task finished. Answer to resume it (add any guidance).";

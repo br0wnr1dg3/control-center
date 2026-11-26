@@ -63,7 +63,9 @@ let runner, team;
 const stamp = Date.now();
 let counter = 0;
 
-const IDLE_MS = 150;
+// Well over the time the fake cmux takes to answer (a node start per call), or a screen drawn a moment
+// ago already counts as still.
+const IDLE_MS = 500;
 const idle = () => new Promise((r) => setTimeout(r, IDLE_MS * 2));
 
 const task = async (fields = {}) =>
@@ -180,6 +182,8 @@ test("a session waiting on a review doesn't keep ready work from starting", asyn
   assert.equal(started(), 0);
 
   await publish(cut);
+  cut.window.screen = "Published Cut v1 for review.";
+  show();
   await dispatch();
   await idle();
   await dispatch();
@@ -210,4 +214,163 @@ test("a session back at work after the decision takes its slot again", async () 
   assert.equal(started(), 0);
   const typed = readFileSync(join(home, "calls.log"), "utf8");
   assert.match(typed, /Review from Pat: Changes requested: tighten the intro/, "and the decision was typed into the same session");
+});
+
+// ---------- Sessions that went quiet ----------
+
+const MIN = 60000;
+const NOW = Date.UTC(2026, 0, 1, 12);
+const STALL = { stallMinutes: 15, stallNudges: 3, stallReplyMinutes: 3 };
+// One poll's decision: a session in progress, not awaiting a review, unless the test says otherwise.
+const decideStall = (fields = {}, config = STALL) => runner.stallAction({ task: row(7, "in_progress"), now: NOW, ...fields }, config);
+// A stretch that began 15 minutes before its first nudge.
+const nudged = (count, minutesAgo) => ({ count, lastAt: NOW - minutesAgo * MIN, since: NOW - (minutesAgo + 15 * count) * MIN });
+
+test("a session is left alone until its screen has been still for the threshold", () => {
+  assert.deepEqual(decideStall({ quiet: 0 }), { action: "none", nudges: null });
+  assert.deepEqual(decideStall({ quiet: 14.9 }), { action: "none", nudges: null }, "a long tool call, or a short wait");
+  const first = decideStall({ quiet: 15 });
+  assert.equal(first.action, "nudge");
+  assert.equal(first.minutes, 15);
+  assert.deepEqual(first.nudges, { count: 1, lastAt: NOW, since: NOW - 15 * MIN });
+});
+
+test("only an in-progress session with a window, no review pending and nothing to deliver is nudged", () => {
+  const quiet = 60;
+  const state = nudged(1, 20);
+  const left = { action: "none", nudges: null };
+  assert.deepEqual(decideStall({ quiet, nudges: state, task: row(7, "needs_you") }), left, "waiting on the owner");
+  assert.deepEqual(decideStall({ quiet, nudges: state, task: row(7, "done") }), left, "finished, being cleaned up");
+  assert.deepEqual(decideStall({ quiet, nudges: state, task: row(7, "ready") }), left);
+  assert.deepEqual(decideStall({ quiet, nudges: state, task: row(7, "in_progress", true) }), left, "waiting on a review");
+  assert.deepEqual(decideStall({ quiet, nudges: state, task: { id: 7, status: "in_progress" } }), left, "a database without awaiting_review: unknown, so no");
+  assert.deepEqual(decideStall({ quiet, nudges: state, hasWindow: false }), left, "no window on this machine");
+  assert.deepEqual(decideStall({ quiet, nudges: state, pending: 1 }), left, "a comment is about to wake it");
+  assert.deepEqual(decideStall({ quiet, nudges: state }, { ...STALL, stallMinutes: 0 }), left, "turned off");
+  assert.deepEqual(decideStall({ quiet: Infinity, nudges: state }), { action: "none", nudges: state }, "a screen that can't be read: no typing, count kept");
+});
+
+test("nudges are spaced by the threshold and stop at the limit", () => {
+  // Nudged 10 minutes ago, and the screen hasn't moved since before the stretch began.
+  let state = nudged(1, 10);
+  assert.deepEqual(decideStall({ quiet: 25, nudges: state }), { action: "none", nudges: state }, "too soon after the last one");
+
+  state = nudged(1, 15);
+  const second = decideStall({ quiet: 30, nudges: state });
+  assert.equal(second.action, "nudge");
+  assert.equal(second.minutes, 30, "counted from when the screen first went still");
+  assert.deepEqual(second.nudges, { count: 2, lastAt: NOW, since: state.since });
+
+  state = nudged(2, 15);
+  assert.equal(decideStall({ quiet: 45, nudges: state }).nudges.count, 3);
+
+  state = nudged(3, 14);
+  assert.equal(decideStall({ quiet: 59, nudges: state }).action, "none", "the last nudge gets a full threshold too");
+  state = nudged(3, 15);
+  assert.deepEqual(decideStall({ quiet: 60, nudges: state }), { action: "escalate", minutes: 60, count: 3, nudges: null });
+
+  assert.equal(decideStall({ quiet: 30, nudges: nudged(1, 15) }, { ...STALL, stallNudges: 1 }).action, "escalate", "the limit is configurable");
+  assert.equal(decideStall({ quiet: 15 }, { ...STALL, stallNudges: 0 }).action, "escalate", "no nudges: straight to the owner");
+});
+
+test("an answer to the nudge doesn't end the quiet stretch, but real activity does", () => {
+  // The nudge was typed 15 minutes ago; the session said one line a minute later and went still again.
+  let state = nudged(1, 15);
+  const answered = decideStall({ quiet: 14, nudges: state });
+  assert.deepEqual(answered, { action: "none", nudges: state }, "not still for a threshold yet, and the count is kept");
+  state = nudged(1, 16);
+  assert.equal(decideStall({ quiet: 15, nudges: state }).nudges.count, 2, "a threshold after its answer, it's nudged again");
+  state = nudged(3, 16);
+  assert.equal(decideStall({ quiet: 15, nudges: state }).action, "escalate", "three answers and no work reach the owner");
+
+  // The session went back to work: its screen was still changing well after the nudge.
+  state = nudged(2, 20);
+  assert.deepEqual(decideStall({ quiet: 0, nudges: state }), { action: "none", nudges: null }, "working now");
+  assert.deepEqual(decideStall({ quiet: 10, nudges: state }), { action: "none", nudges: null }, "worked for 10 minutes, then stopped");
+  const again = decideStall({ quiet: 15, nudges: nudged(3, 30) });
+  assert.equal(again.action, "nudge", "a new stretch starts at the first nudge, not at the owner");
+  assert.equal(again.nudges.count, 1);
+  assert.equal(again.minutes, 15);
+});
+
+test("the messages say how long and how many", () => {
+  assert.match(runner.stallNudge({ id: 7 }, 15.4), /^Runner check: this session has been quiet for 15 minutes and CC-7 isn't finished\..*ask_human/);
+  assert.match(runner.stallQuestion(60.2, 3), /^The session went quiet 60 minutes ago and 3 nudges didn't/);
+  assert.match(runner.stallQuestion(15, 1), /and 1 nudge didn't/);
+});
+
+const typedInto = (w) =>
+  readFileSync(join(home, "calls.log"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    .filter(([cmd, , ref]) => cmd === "send" && ref === w.ref).map((args) => args.at(-1));
+const events = (t, kind) => db(`task_events?task_id=eq.${t.id}&kind=eq.${kind}&select=body&order=id`);
+// A threshold of a second: longer than a nudge takes to type and record, so the next look is too soon.
+const STALL_MS = 1000;
+const QUICK = { stallMinutes: STALL_MS / MIN, stallNudges: 2, stallReplyMinutes: STALL_MS / 5 / MIN };
+const stalled = () => new Promise((r) => setTimeout(r, STALL_MS * 1.2));
+
+test("a quiet session is nudged, then handed to the owner", async () => {
+  const s = await session();
+  const [t] = await tasks();
+  const check = () => runner.checkStalled(t, s.window.ref, 0, QUICK);
+
+  assert.equal(await check(), "none", "first look");
+  await stalled();
+  assert.equal(await check(), "nudge");
+  assert.equal(await check(), "none", "not again straight away");
+  assert.equal(typedInto(s.window).length, 1);
+  assert.match(typedInto(s.window)[0], new RegExp(`^Runner check: .* CC-${s.id} isn't finished`));
+  assert.equal(await statusOf(s), "in_progress");
+
+  await stalled();
+  assert.equal(await check(), "nudge");
+  await stalled();
+  assert.equal(await check(), "escalate");
+  assert.equal(typedInto(s.window).length, 2, "nothing is typed when it goes to the owner");
+  const [now] = await db(`tasks?id=eq.${s.id}&select=status,question`);
+  assert.equal(now.status, "needs_you");
+  assert.match(now.question, /^The session went quiet \d+ minutes ago and 2 nudges didn't/);
+  assert.deepEqual((await events(s, "note")).map((e) => e.body.slice(0, 37)), ["runner nudged the session (1 of 2): i", "runner nudged the session (2 of 2): i"]);
+  assert.equal((await events(s, "question")).at(-1).body, now.question);
+});
+
+test("a session that goes back to work starts a new count", async () => {
+  const s = await session();
+  const [t] = await tasks();
+  const check = () => runner.checkStalled(t, s.window.ref, 0, QUICK);
+
+  await check();
+  await stalled();
+  assert.equal(await check(), "nudge");
+  await stalled();
+  assert.equal(await check(), "nudge");
+  await stalled();
+  s.window.screen = "✻ Generating the voiceover… (3s)";
+  show();
+  assert.equal(await check(), "none", "working");
+  await stalled();
+  assert.equal(await check(), "nudge", "quiet again: a nudge, not the owner");
+  assert.equal(await statusOf(s), "in_progress");
+});
+
+test("a task that has just asked something isn't nudged out of needs_you", async () => {
+  const s = await session();
+  const [stale] = await tasks();
+  await runner.checkStalled(stale, s.window.ref, 0, QUICK);
+  await stalled();
+  // The session's hook moved it after this poll read the tasks.
+  await db(`tasks?id=eq.${s.id}`, { method: "PATCH", body: { status: "needs_you", question: "Which cut?" } });
+  assert.equal(await runner.checkStalled(stale, s.window.ref, 0, QUICK), "none");
+  assert.deepEqual(typedInto(s.window), []);
+  assert.equal((await db(`tasks?id=eq.${s.id}&select=question`))[0].question, "Which cut?");
+});
+
+test("the poll leaves working, waiting and review sessions alone at the default threshold", async () => {
+  const working = await session();
+  const asked = await session({ status: "needs_you", question: "Which cut?" });
+  const published = await session();
+  await publish(published);
+  await dispatch();
+  await idle();
+  await dispatch();
+  for (const s of [working, asked, published]) assert.deepEqual(typedInto(s.window), []);
 });
