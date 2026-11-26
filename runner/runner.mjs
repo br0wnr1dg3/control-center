@@ -52,6 +52,23 @@ const TASKS_DIR = join(CONFIG.home, "tasks");
 const OWNER = process.env.CC_OWNER_NAME || "the owner";
 const HOOK = join(dirname(fileURLToPath(import.meta.url)), "hooks", "session-state.mjs");
 
+// Optional, for machines nobody signs in to: if the Keychain holds an Infisical machine identity
+// ("infisical client id" and "infisical client secret", account control-center), each session starts
+// with a fresh access token in INFISICAL_TOKEN, which the infisical CLI uses instead of a person's
+// login (those expire). The values go to the CLI through its environment, falling back to flags for
+// CLIs that don't read it, and are never written to the script, the log or the task. Without the
+// Keychain items this does nothing. A resumed session runs this again, so it gets a new token.
+export const MACHINE_SECRETS_LOGIN = [
+  `if command -v infisical >/dev/null 2>&1 \\`,
+  `  && cc_id=$(security find-generic-password -a control-center -s "infisical client id" -w 2>/dev/null) \\`,
+  `  && cc_secret=$(security find-generic-password -a control-center -s "infisical client secret" -w 2>/dev/null); then`,
+  `  cc_token=$(INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="$cc_id" INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="$cc_secret" infisical login --method=universal-auth --silent --plain 2>/dev/null | tail -n 1)`,
+  `  [[ "$cc_token" == *.*.* ]] || cc_token=$(infisical login --method=universal-auth --client-id="$cc_id" --client-secret="$cc_secret" --silent --plain 2>/dev/null | tail -n 1)`,
+  `  if [[ "$cc_token" == *.*.* ]]; then export INFISICAL_TOKEN="$cc_token"; else echo "control-center: Infisical machine login failed; secrets will need a signed-in user" >&2; fi`,
+  `fi`,
+  `unset cc_id cc_secret cc_token`,
+].join("\n");
+
 // Session hooks that keep the board in step with the terminal: a session waiting on the owner shows up
 // as needs_you in the inbox however the agent asked, and typing into it moves the task back.
 function sessionSettings(taskId) {
@@ -464,6 +481,7 @@ cd ${JSON.stringify(cwd)}
 export CC_TASK_ID=${task.id}
 export CC_OWNER_NAME=${JSON.stringify(OWNER)}
 export PATH=${JSON.stringify(join(dirname(fileURLToPath(import.meta.url)), "bin"))}:$PATH
+${MACHINE_SECRETS_LOGIN}
 exec claude "$(cat ${JSON.stringify(join(dir, "prompt.md"))})" ${claudeArgs}${worktreeArgs} --name ${shellQuote(workspaceTitle(task))} \\
   --remote-control ${shellQuote(workspaceTitle(task))} --settings ${JSON.stringify(settings)} \\
   --dangerously-skip-permissions
