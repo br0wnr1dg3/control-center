@@ -507,12 +507,17 @@ function settle(item, status, who) {
 // The request the review page's Approve and Request changes buttons make, to the same address.
 // keepalive lets it finish when it's sent as the page is being left. It carries a key of its own, as the
 // review page's does: the server decides once per key, so when no proper answer comes back (nothing, a
-// 5xx, something that isn't JSON) the same request is simply sent again, twice at most.
+// 5xx, something that isn't JSON) the same request is simply sent again, twice at most, and again with
+// the same key if the person then asks for the same thing.
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 const newKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 async function send(item, decision, message, who, before) {
   item.busy = true; item.state = "Sending…"; render();
-  const body = JSON.stringify({ name: who, decision, message, client_key: newKey() });
+  // The key stays on the card until there is a definite answer, so sending the same decision again after
+  // answers were lost (a click on the same button) is still the same decision. Another decision, or another
+  // message, is a new one.
+  if (!item.sendKey || item.sendKey.decision !== decision || item.sendKey.message !== message) item.sendKey = { key: newKey(), decision, message };
+  const body = JSON.stringify({ name: who, decision, message, client_key: item.sendKey.key });
   let failure = null, reply = null, status = 0;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt) await pause(attempt === 1 ? 700 : 2000);
@@ -527,6 +532,8 @@ async function send(item, decision, message, who, before) {
     if (reply && status < 500) break;
   }
   const sent = reply && status >= 200 && status < 300;
+  // Decided, or refused in so many words: either way this request is finished with.
+  if (reply && status < 500) item.sendKey = null;
   if (!sent) failure = !reply || status >= 500 ? "no proper answer from the server. Try again: it won’t be decided twice."
     : typeof reply.error === "string" ? reply.error.slice(0, 240) : "the server refused (" + status + ").";
   item.busy = false;

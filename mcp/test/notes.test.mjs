@@ -314,6 +314,42 @@ test("a second decision hands over only what is new, and a decision's message is
   assert.equal((await call("GET", `/r/${r.token}/data`)).body.notes.length, 2);
 });
 
+test("a note's timecode reads in the decision as it does on the page, and no stored value can break a decision", async () => {
+  // The page's own formatter, on the value the page is given.
+  const fmt = (t) => Math.floor(t / 60) + ":" + (t % 60).toFixed(1).padStart(4, "0");
+  const r = await publish("Timecodes");
+  // Ties at the second decimal, where rounding a decimal and rounding the double part ways, and the edges of a minute.
+  const asked = [0, 0.04, 0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 2.25, 2.5, 7.35, 12.345, 29.95, 59.94, 59.95, 59.96, 59.99,
+    60, 60.05, 61.25, 83.456789, 119.95, 119.9999, 120.15, 599.95, 3599.95, 3600.05, 7325.55, 86399.95, 999999.95, 1000000];
+  for (const [i, timecode] of asked.entries()) assert.equal((await addNote(r.token, SAM, { body: `n${i}`, timecode })).status, 200, String(timecode));
+  const seen = Object.fromEntries((await notesOf(r.token)).map((n) => [n.body, fmt(n.timecode)]));
+  assert.deepEqual([seen.n3, seen.n4, seen.n25], ["0:00.1", "0:00.3", "1:01.3"], "0.15 is a hair under 0.15 and rounds down; 0.25 is exact and rounds up");
+  assert.equal((await decide(r.token, SAM, "changes")).status, 200);
+  const said = Object.fromEntries([...(await decisionsOf(r.task.id))[0].body.matchAll(/^- \[(.+?)\] (n\d+)$/gm)].map((m) => [m[2], m[1]]));
+  assert.deepEqual(said, seen);
+  assert.equal(Object.keys(said).length, asked.length);
+
+  // Past any video: refused, with nothing stored. Not a time at all: a comment without a timecode, as before.
+  const far = await publish("Far timecodes");
+  for (const timecode of [1000000.5, 1e12, 1e300]) {
+    const res = await addNote(far.token, SAM, { body: "Far away", timecode, still: STILL });
+    assert.equal(res.status, 400, String(timecode));
+    assert.equal(typeof res.body.error, "string");
+  }
+  assert.deepEqual(await notesOf(far.token), []);
+  assert.equal((await addNote(far.token, SAM, { body: "No time", timecode: -3 })).body.timecode, null);
+  // Rows from before the cap, or written some other way, with values a real can hold: the decision goes through.
+  for (const [i, timecode] of [1e12, 3e38, "Infinity", "NaN", -5].entries()) {
+    ok(await db.from("task_comments").insert({ task_id: far.task.id, author: "reviewer", author_name: "Sam", review_id: far.id, body: `legacy ${i}`, timecode, delivered_at: new Date().toISOString() }));
+  }
+  const sent = await decide(far.token, SAM, "changes");
+  assert.equal(sent.status, 200, sent.text);
+  const body = (await decisionsOf(far.task.id))[0].body;
+  for (let i = 0; i < 5; i++) assert.ok(body.includes(`legacy ${i}`), body);
+  assert.match(body, /^- \[16666666666:40\.0\] legacy 0$/m);
+  assert.match(body, /^- legacy 3$/m, "not a time: no label, and no error");
+});
+
 test("a Worker from before this keeps working: its rows are told apart as they are written", async () => {
   const r = await publish("Old writer");
   // As that Worker writes a note and then a decision: no review_kind, no bundled_at.
@@ -351,6 +387,8 @@ test("the page's script parses, never prints a response body, and says what was 
   const batchHtml = await (await fetch(made.body.url)).text();
   const batchScript = batchHtml.slice(batchHtml.indexOf("<script>") + 8, batchHtml.lastIndexOf("</script>"));
   assert.doesNotThrow(() => new vm.Script(batchScript));
-  assert.match(batchScript, /client_key: newKey\(\)/);
+  // The key is the card's, kept until a definite answer, so asking again after lost answers is the same decision.
+  assert.match(batchScript, /client_key: item\.sendKey\.key/);
+  assert.equal(/client_key: newKey\(\)/.test(batchScript), false);
   assert.equal(/"Couldn't send: " \+ \(await res\.text\(\)\)/.test(batchScript), false);
 });

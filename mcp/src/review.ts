@@ -229,6 +229,7 @@ async function ownerHash(request: Request): Promise<string | null> {
 }
 
 const NOTE_MAX = 5000;
+const TIMECODE_MAX = 1_000_000; // seconds: eleven days, far past any cut, and far inside what the timecode's label can be made from
 const NOTE_COLUMNS = "id,author,author_name,body,timecode,still_url,quote,quote_start,created_at,edited_at,owner_hash";
 type NoteRow = {
   id: number; author: string; author_name: string | null; body: string; timecode: number | null; still_url: string | null;
@@ -310,6 +311,8 @@ async function addNote(request: Request, env: ReviewEnv, db: SupabaseClient, rev
   const name = text(input.name)?.trim().slice(0, 60);
   if (!body || !name) return json({ error: "name and body are required" }, 400);
   if (body.length > NOTE_MAX) return json({ error: `A comment can be at most ${NOTE_MAX} characters.` }, 400);
+  // Refused rather than stored: no cut is that long. (Not a number, negative or not finite is no timecode at all, as before.)
+  if (typeof input.timecode === "number" && input.timecode > TIMECODE_MAX) return json({ error: "That timecode is past the end of any video." }, 400);
   const hash = await ownerHash(request);
 
   // The page retries a save whose answer never arrived, with the same key: the note that save made is the answer.

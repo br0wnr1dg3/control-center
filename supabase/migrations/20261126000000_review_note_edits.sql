@@ -115,6 +115,52 @@ begin
   return jsonb_build_object('deleted', c.id, 'still_url', c.still_url);
 end $$;
 
+-- A note's timecode as the review page shows it, "m:ss.s", for the decision's comment: the agent is told
+-- the frame in the words the reviewer saw. The page gets the stored value (a real) as JSON, reads it as a
+-- double and prints Math.floor(s / 60) + ":" + (s % 60).toFixed(1), which rounds the double's exact value,
+-- a tie going up. Rounding a numeric made from the same value would not agree: 0.15 is, as a double, a
+-- hair under 0.15, so the page says 0:00.1. So the same double is taken here (through the real's text, as
+-- JSON carries it) and the seconds are rounded on its exact value: scaled by a power of two, which is
+-- exact, it is a whole number, and the rest is integer arithmetic.
+--
+-- The real's text depends on the session's extra_float_digits (0 here, so six significant digits), and
+-- that is wanted: the page's JSON and this function are both made in PostgREST's sessions, so they read
+-- the same digits whatever the setting is. Hence stable, not immutable, and no setting pinned here.
+--
+-- Null for a value that isn't a time (negative, NaN, infinite), and no error for any value at all: a row
+-- from before timecodes were capped must not stop its review from being decided. Past 1e9 seconds only
+-- that much is promised, not the page's exact digits.
+create function review_timecode_label(p_timecode real) returns text
+language plpgsql stable set search_path = public as $$
+declare
+  x float8;
+  minutes float8;
+  seconds float8;
+  scale int;
+  tenths numeric;
+begin
+  if p_timecode is null or p_timecode = 'NaN'::real or p_timecode = 'Infinity'::real or p_timecode < 0 then
+    return null;
+  end if;
+  x := p_timecode::text::float8;
+  if x >= 1e9 then
+    return trunc(x::numeric / 60)::text || ':' || to_char(round(x::numeric - 60 * trunc(x::numeric / 60), 1), 'FM00.0');
+  end if;
+  minutes := floor(x / 60);
+  seconds := x - 60 * minutes;
+  -- The division rounded up to a whole minute: the page then shows that minute and "60.0" seconds.
+  if seconds < 0 then
+    seconds := x - 60 * (minutes - 1);
+  end if;
+  if seconds < 0.04 then
+    tenths := 0;
+  else
+    scale := case when seconds >= 1 then 52 else 57 end;
+    tenths := div((seconds * power(2::float8, scale))::bigint::numeric * 20 + (1::bigint << scale)::numeric, (1::bigint << scale)::numeric * 2);
+  end if;
+  return minutes::numeric::text || ':' || to_char(tenths / 10, 'FM00.0');
+end $$;
+
 -- A decision, whole. In order: the task is completed (if this is an approval of a review that completes
 -- its task), the review is marked, the waiting notes are marked as handed over, and the comment listing
 -- them is written. The task goes first so that webhooks say what they always have: task.status, then
@@ -176,9 +222,7 @@ begin
   -- The notes still waiting, in the order the page lists them. Exactly these are marked: one being written
   -- at this moment isn't among them, and waits for the next decision.
   select array_agg(n.id), string_agg(
-           '- ' || case when n.timecode is null then '' else
-                     '[' || floor(n.timecode::float8 / 60)::int || ':' ||
-                     to_char((n.timecode::float8 - 60 * floor(n.timecode::float8 / 60))::numeric, 'FM00.0') || '] ' end
+           '- ' || coalesce('[' || review_timecode_label(n.timecode) || '] ', '')
                 || case when n.quote is null or n.quote = '' then '' else
                      'On "' || case when length(regexp_replace(n.quote, '\s+', ' ', 'g')) > 160
                                     then left(regexp_replace(n.quote, '\s+', ' ', 'g'), 157) || '...'
@@ -217,9 +261,11 @@ begin
                             'completed_task', completed, 'notes', coalesce(array_length(picked, 1), 0));
 end $$;
 
+revoke all on function review_timecode_label(real) from public, anon, authenticated;
 revoke all on function edit_review_note(bigint, bigint, text, text) from public, anon, authenticated;
 revoke all on function delete_review_note(bigint, bigint, text) from public, anon, authenticated;
 revoke all on function decide_review(bigint, text, text, text, text) from public, anon, authenticated;
+grant execute on function review_timecode_label(real) to service_role;
 grant execute on function edit_review_note(bigint, bigint, text, text) to service_role;
 grant execute on function delete_review_note(bigint, bigint, text) to service_role;
 grant execute on function decide_review(bigint, text, text, text, text) to service_role;
