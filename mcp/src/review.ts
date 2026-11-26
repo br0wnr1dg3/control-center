@@ -18,7 +18,8 @@
 // are stored already delivered; the decision is posted to the task as one comment listing them, so a
 // waiting agent gets the whole review at once. Nothing copies a note anywhere before that, which is why a
 // note can be changed or removed until the decision and not after (the X-Review-Owner secret: see
-// ownerHash). With completes_task, approving also marks the task done,
+// ownerHash). The decision itself is one transaction in Postgres (decide_review), and a request that
+// carries a client_key can arrive twice without deciding twice. With completes_task, approving also marks the task done,
 // which frees whatever was waiting on it (task_dependencies); the runner still delivers the decision to
 // the session before asking it to clean up.
 //
@@ -50,12 +51,6 @@ type Review = {
   version: number;
   note: string | null;
   is_current: boolean;
-};
-
-const formatTime = (seconds: number) => {
-  const m = Math.floor(seconds / 60);
-  const s = (seconds % 60).toFixed(1).padStart(4, "0");
-  return `${m}:${s}`;
 };
 
 export async function handleReview(request: Request, env: ReviewEnv): Promise<Response | null> {
@@ -255,7 +250,7 @@ async function data(request: Request, db: SupabaseClient, review: Review) {
       .from("task_comments")
       .select(NOTE_COLUMNS)
       .eq("review_id", review.id)
-      .not("delivered_at", "is", null)
+      .eq("review_kind", "note") // a decision's message is the task's, not one of the review's comments
       .order("timecode", { ascending: true, nullsFirst: true })
       .order("quote_start", { ascending: true, nullsFirst: true })
       .order("created_at")
@@ -327,7 +322,7 @@ async function addNote(request: Request, env: ReviewEnv, db: SupabaseClient, rev
 
   // The frame is a nicety; the comment and its timecode are the point. So a still that can't be read or
   // stored (R2 throws rather than answering) costs the still, not the comment.
-  let stillUrl: string | null = null, stillFile: string | null = null;
+  let stillUrl: string | null = null, stillFile: string | null = null, stillFailed = false;
   const still = text(input.still);
   if (still?.startsWith("data:image/jpeg;base64,") && still.length < 7_000_000) {
     try {
@@ -339,6 +334,7 @@ async function addNote(request: Request, env: ReviewEnv, db: SupabaseClient, rev
         stillUrl = `${env.PUBLIC_URL}/r/${review.token}/still/${file}`;
       }
     } catch (err) {
+      stillFailed = true;
       console.error("review note: still not stored", review.id, err);
     }
   }
@@ -362,6 +358,7 @@ async function addNote(request: Request, env: ReviewEnv, db: SupabaseClient, rev
       quote_start: quoteStart,
       owner_hash: hash,
       client_key: clientKey,
+      review_kind: "note",
       delivered_at: new Date().toISOString(), // reaches the agent with the decision, not one by one
     })
     .select(NOTE_COLUMNS)
@@ -376,7 +373,8 @@ async function addNote(request: Request, env: ReviewEnv, db: SupabaseClient, rev
     console.error("review note: not saved", review.id, error.message);
     return json({ error: "The comment couldn't be saved just now. Try again." }, 500);
   }
-  return json(noteOut(note, hash));
+  // The page says so, rather than the frame just not being there.
+  return json({ ...noteOut(note, hash), ...(stillFailed ? { still_failed: true } : {}) });
 }
 
 // Why a change was refused, as edit_review_note and delete_review_note report it.
@@ -420,105 +418,42 @@ async function deleteNote(request: Request, env: ReviewEnv, db: SupabaseClient, 
   return json({ ok: true, deleted: result.deleted });
 }
 
-type DecisionNote = { author_name: string | null; body: string; timecode: number | null; still_url: string | null; quote: string | null };
-
 async function decide(request: Request, db: SupabaseClient, review: Review) {
   const input = await readJson(request);
   const name = text(input.name)?.trim().slice(0, 60);
   const decision = input.decision === "approve" ? "approved" : input.decision === "changes" ? "changes_requested" : null;
   if (!name || !decision) return json({ error: "name and decision are required" }, 400);
-  const message = text(input.message)?.trim().slice(0, NOTE_MAX);
+  const message = text(input.message)?.trim().slice(0, NOTE_MAX) || null;
+  // The page's id for this one decision. Sent again with the same key (the answer was lost), it is the same
+  // decision, not a second one.
+  const key = /^[A-Za-z0-9-]{8,64}$/.test(text(input.client_key) ?? "") ? text(input.client_key)! : null;
 
   // Approving a version that isn't the one that counts has to be meant. Checked here, not only on the
   // page, so a batch grid or an old tab that still thinks this version is current can't do it by accident.
-  let supersededBy: number | null = null;
-  if (!review.is_current) {
+  if (!review.is_current && decision === "approved" && input.confirm_superseded !== true) {
     const { data: current } = await db.from("reviews").select("version").eq("piece_id", review.piece_id).eq("is_current", true).maybeSingle();
-    supersededBy = current?.version ?? null;
-    if (decision === "approved" && input.confirm_superseded !== true) {
-      return json({
-        error: `Version ${review.version} is superseded${supersededBy ? `: version ${supersededBy} is the current one` : ""}. Approving it has to be confirmed.`,
-        superseded: true,
-        current_version: supersededBy,
-      }, 409);
-    }
+    const supersededBy: number | null = current?.version ?? null;
+    return json({
+      error: `Version ${review.version} is superseded${supersededBy ? `: version ${supersededBy} is the current one` : ""}. Approving it has to be confirmed.`,
+      superseded: true,
+      current_version: supersededBy,
+    }, 409);
   }
 
-  // The review is marked and its notes are read in one transaction (decide_review), under the lock an edit
-  // takes: every note since this version's last decision goes to the agent in one message, as it stood when
-  // the decision was made, and no note changes after. If this fails nothing was decided, so asking again is safe.
-  const { data: decided, error: decideError } = await db.rpc("decide_review", { p_review: review.id, p_status: decision, p_name: name });
-  if (decideError || !decided) {
-    console.error("review decision: not recorded", review.id, decideError?.message);
+  // All of it is one transaction (decide_review): the task is completed if this approval does that, the
+  // review is marked, and the comment that hands the agent every waiting note is written, in that order, so
+  // webhooks see the task done before review.decided. Either all of it happened or none of it did, which is
+  // what makes asking again safe.
+  const { data: done, error } = await db.rpc("decide_review", { p_review: review.id, p_status: decision, p_name: name, p_message: message, p_key: key });
+  if (error || !done) {
+    console.error("review decision: not recorded", review.id, error?.message);
     return json({ error: "The decision couldn't be recorded just now. Nothing was decided; try again." }, 500);
   }
-  const notes = (decided.notes ?? []) as DecisionNote[];
-  const stamp = { status: decision, decided_by: decided.decided_by as string, decided_at: decided.decided_at as string };
-
-  const lines = notes.map(
-    (n) =>
-      `- ${n.timecode !== null ? `[${formatTime(n.timecode)}] ` : ""}${n.quote ? `On "${clip(n.quote)}": ` : ""}${n.body}${n.author_name !== name ? ` (${n.author_name})` : ""}` +
-      (n.still_url ? ` frame: ${n.still_url}` : ""),
-  );
-  // The agent should know when the decision is about a version that no longer counts.
-  const which = review.is_current ? "" : ` (version ${review.version}, superseded${supersededBy ? ` by version ${supersededBy}` : ""})`;
-  const headline = (decision === "approved" ? `Approved "${review.title}"` : `Changes requested on "${review.title}"`) + which;
-  // Done before the comment, which only says so if it worked. Should the runner look in between, it asks
-  // the session to clean up first and types the decision on its next poll: the window stays open for that.
-  let completed = false;
-  let completeError: string | null = null;
-  if (decision === "approved" && review.completes_task) {
-    // A task that was cancelled in the meantime stays cancelled.
-    const { data: finished, error } = await db
-      .from("tasks")
-      .update({ status: "done", question: null })
-      .eq("id", review.task_id)
-      .not("status", "in", "(done,cancelled)")
-      .select("id");
-    completeError = error?.message ?? null;
-    completed = Boolean(finished?.length);
-  }
-  const body = [
-    headline + (message ? `: ${message}` : "."),
-    lines.length ? `Notes:\n${lines.join("\n")}` : "",
-    completed ? `This approval completes CC-${review.task_id}: it's now marked done, so there's nothing more to do on it.` : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-
-  // This comment is the agent's only copy of the review, and the review is already marked, so one failed
-  // write is tried again before giving up.
-  let posted = false;
-  for (let attempt = 0; attempt < 3 && !posted; attempt++) {
-    const { error } = await db.from("task_comments").insert({
-      task_id: review.task_id,
-      author: "reviewer",
-      author_name: name,
-      body,
-      review_id: review.id,
-    });
-    posted = !error;
-    if (error) console.error("review decision: comment not posted", review.id, attempt, error.message);
-  }
-  // `decided` tells the page the review is marked, whatever else went wrong, so it doesn't send the decision again.
-  if (!posted) return json({ error: "The decision was recorded, but it couldn't be passed on to the agent.", decided: true, notified: false, ...stamp }, 500);
-  if (completed) {
-    await db.from("task_events").insert({
-      task_id: review.task_id,
-      kind: "status",
-      body: `done: ${name} approved "${review.title}"`,
-      actor: "reviewer",
-    });
-  }
-  // The decision is recorded and on its way to the agent, but the reviewer should know the task isn't done.
-  if (completeError) return json({ error: `Decision sent, but the task couldn't be marked done: ${completeError}`, decided: true, notified: true, ...stamp }, 500);
-  return json({ ok: true, ...stamp, completed_task: completed });
+  const stands = { status: done.status as string, decided_by: done.decided_by as string | null, decided_at: done.decided_at as string | null };
+  // This request was an earlier decision of this page's, and someone has decided since: theirs stands.
+  if (done.stale) return json({ error: "This review has been decided again since; that decision stands and yours wasn't sent a second time.", decided: true, stale: true, ...stands }, 409);
+  return json({ ok: true, ...stands, completed_task: Boolean(done.completed_task) });
 }
-
-const clip = (text: string) => {
-  const flat = text.replace(/\s+/g, " ");
-  return flat.length > 160 ? `${flat.slice(0, 157)}...` : flat;
-};
 
 // ---------- Page ----------
 
@@ -878,8 +813,8 @@ const HEADERS = { "Content-Type": "application/json", "X-Review-Owner": owner };
 // Every request the page makes goes through here, and none of them throws or hands back a raw body: the
 // answer is JSON or it is nothing. An answer that never came, wasn't JSON (an error page from the network in
 // between) or was a 5xx is "unsure", and is asked again after a short wait, up to "retries" times. What is
-// sent has to be safe to send twice: a comment carries a key the server remembers, an edit and a delete
-// come to the same thing, and a decision isn't retried here at all (see decide).
+// sent has to be safe to send twice, and is: a comment and a decision each carry a key the server remembers,
+// and an edit and a delete come to the same thing the second time.
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 async function call(path, opts, retries, onRetry) {
   for (let attempt = 0; ; attempt++) {
@@ -1319,7 +1254,9 @@ async function add() {
   sendKey = null;
   if (!notes.some((n) => n.id === saved.id)) notes.push(saved);
   notes.sort((a, b) => (a.timecode ?? -1) - (b.timecode ?? -1));
-  $("body").value = ""; $("addState").textContent = "";
+  $("body").value = "";
+  // The comment is in; only its picture of the frame isn't, and the timecode still says where it is.
+  $("addState").textContent = saved.still_failed ? "Comment saved, but the frame capture wasn’t." : "";
   setPending(null); render();
   const el = document.querySelector('.note[data-id="' + saved.id + '"]');
   if (el) reveal(el);
@@ -1366,55 +1303,46 @@ $("confirmNo").onclick = () => { const a = popped && popped.anchor; closePop(); 
 $("confirmYes").onclick = () => decide(deciding, deciding === "approve" && review && !review.current);
 
 // One decision at a time: the buttons are off while it is on its way, and a second click does nothing.
-let decidingNow = false;
+// Each decision has a key of its own, sent again with every retry of it (the page's, or the person's after
+// a failure), and the server decides once per key: the same request again is answered as the first was.
+// So a lost answer is simply asked for again. Changing what is decided, or the message, is a new decision.
+let decidingNow = false, decisionKey = null;
 async function decide(decision, confirmed) {
   if (decidingNow || !review) return;
   const who = nameFrom($("decisionName"));
   if (!who) { $("decisionState").textContent = "Add your name first."; placePop(); return; }
-  const at = token, want = decision === "approve" ? "approved" : "changes_requested", began = Date.now();
+  const at = token, want = decision === "approve" ? "approved" : "changes_requested", message = $("message").value;
+  const same = decisionKey && decisionKey.token === at && decisionKey.decision === decision && decisionKey.message === message && decisionKey.who === who;
+  if (!same) decisionKey = { key: random(16), token: at, decision, message, who };
   const buttons = [$("approve"), $("changes"), $("confirmYes"), $("confirmNo"), $("redecide")];
   decidingNow = true;
   for (const b of buttons) b.disabled = true;
   $("decisionState").textContent = "Sending…"; placePop();
-  const send = { method: "POST", headers: HEADERS, body: JSON.stringify({ name: who, decision, message: $("message").value, confirm_superseded: Boolean(confirmed) }) };
-  // A decision sent twice would reach the agent twice, so it isn't simply sent again when no proper answer
-  // comes back. The review is read first: if it now says what was just decided, that is the answer. Only
-  // when it plainly says nothing was decided is the decision sent again; when even that can't be read, the
-  // page says it doesn't know.
-  let r = null, unknown = false;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt) await wait(attempt * 900);
-    r = await call(base + "/decision", send, 0);
-    if (r.ok || !r.unsure || (r.data && r.data.decided)) break;
-    const d = await call(base + "/data", { headers: HEADERS }, 1);
-    unknown = !d.ok || !d.data.review;
-    if (unknown) break;
-    const now = d.data.review;
-    if (now.status === want && now.decided_by === who && Date.parse(now.decided_at) > began - 120000) {
-      r = { ok: true, status: 200, data: { status: want, decided_by: now.decided_by, decided_at: now.decided_at, completed_task: Boolean(now.completes_task && want === "approved" && d.data.task && d.data.task.status === "done") } };
-      break;
-    }
-  }
+  const r = await call(base + "/decision", { method: "POST", headers: HEADERS,
+    body: JSON.stringify({ name: who, decision, message, confirm_superseded: Boolean(confirmed), client_key: decisionKey.key }) }, 2,
+    () => { if (at === token) { $("decisionState").textContent = "Sending… trying again"; placePop(); } });
   decidingNow = false;
   for (const b of buttons) b.disabled = false;
   if (at !== token) return;
   $("decisionState").textContent = "";
+  const reply = r.data || {};
+  // Someone else decided after this decision of ours had landed: theirs stands, and the page shows it.
+  if (r.status === 409 && reply.decided) { decisionKey = null; redeciding = false; closePop(); toast(why(r, "This review has been decided again since.")); load(); return; }
   // This version stopped being the current one while the page was open: say so, and ask.
   if (r.status === 409) { await load(); if (!isOpen($("decision"))) showPop($("decision"), $("approve")); renderDecision(); $("confirmNo").focus(); return; }
-  const reply = r.data || {};
-  if (!r.ok && !reply.decided) {
-    $("decisionState").textContent = unknown ? "Couldn’t confirm that your decision arrived. Reload the page to see whether it did before sending it again."
-      : why(r, "Couldn’t send your decision. Nothing was decided; try again.");
+  if (!r.ok) {
+    // The key is kept, so pressing the button again asks about the same decision rather than making another.
+    $("decisionState").textContent = r.unsure ? "Couldn’t confirm that your decision arrived. Send it again: it won’t be decided twice."
+      : why(r, "Couldn’t send your decision. Try again.");
     placePop(); return;
   }
   // Shown at once, from the answer itself: the buttons give way to what was decided, by whom and when.
+  decisionKey = null;
   $("message").value = ""; closePop();
-  review.status = want; review.decided_by = reply.decided_by || who; review.decided_at = reply.decided_at || new Date().toISOString();
+  review.status = reply.status || want; review.decided_by = reply.decided_by || who; review.decided_at = reply.decided_at || new Date().toISOString();
   redeciding = false;
   renderOutcome(); render();
-  toast(!r.ok ? (reply.notified === false ? "Your decision is recorded, but it couldn’t be passed on to the editor. Let them know directly."
-                                            : "Decision sent, but the task couldn’t be marked done.")
-    : decision !== "approve" ? "Sent. The editor has your notes."
+  toast(decision !== "approve" ? "Sent. The editor has your notes."
     : reply.completed_task ? "Approved. The task is done." : "Approved. The agent will wrap up.", listPath);
   load();
 }
@@ -1473,7 +1401,7 @@ function openVersion(e, v) {
 }
 function show(next) {
   token = next; base = "/r/" + token;
-  notes = []; review = null; nowId = null; editing = null; redeciding = false; sendKey = null;
+  notes = []; review = null; nowId = null; editing = null; redeciding = false; sendKey = null; decisionKey = null;
   $("outcome").hidden = true; $("approve").hidden = $("changes").hidden = false;
   video.pause(); video.src = base + "/file";
   $("download").href = base + "/file";

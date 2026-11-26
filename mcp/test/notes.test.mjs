@@ -29,9 +29,9 @@ const ok = ({ data, error }) => {
 };
 const addTask = async (title) =>
   ok(await db.from("tasks").insert({ title, kind: "agent", status: "in_progress", team_id: team.id, source: "notes-test" }).select().single());
-async function publish(title) {
+async function publish(title, query = "") {
   const task = await addTask(title);
-  const res = await fetch(`${BASE}/api/publish?task=${task.id}&filename=cut.txt&title=${encodeURIComponent(title)}`, {
+  const res = await fetch(`${BASE}/api/publish?task=${task.id}&filename=cut.txt&title=${encodeURIComponent(title)}${query}`, {
     method: "PUT",
     headers: { authorization: `Bearer ${UPLOAD}`, "content-type": "text/plain" },
     body: title,
@@ -54,7 +54,11 @@ const call = async (method, path, headers, body) => {
 const addNote = (token, who, body) => call("POST", `/r/${token}/notes`, who, { name: "Sam", ...body });
 const edit = (token, id, who, body) => call("PATCH", `/r/${token}/notes/${id}`, who, body);
 const remove = (token, id, who) => call("DELETE", `/r/${token}/notes/${id}`, who);
-const decide = (token, who, decision) => call("POST", `/r/${token}/decision`, who, { name: "Sam", decision });
+const decide = (token, who, decision, extra = {}) => call("POST", `/r/${token}/decision`, who, { name: "Sam", decision, ...extra });
+const key = () => randomBytes(16).toString("hex");
+// What the team's webhooks were queued for a task, in the order it happened.
+const events = async (taskId) => ok(await db.from("webhook_deliveries").select("event_type,payload").eq("task_id", taskId).order("id"));
+const decisionsOf = async (taskId) => ok(await db.from("task_comments").select("*").eq("task_id", taskId).eq("review_kind", "decision").order("id"));
 const notesOf = async (token, who = {}) => (await call("GET", `/r/${token}/data`, who)).body.notes;
 const row = async (id) => ok(await db.from("task_comments").select("*").eq("id", id).maybeSingle());
 // The smallest thing a browser's canvas would call a JPEG; the Worker stores what it is given.
@@ -62,9 +66,13 @@ const STILL = `data:image/jpeg;base64,${Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 
 
 before(async () => {
   team = ok(await db.from("teams").insert({ key: `notes-${run}`, name: `Notes test ${run}` }).select().single());
+  // Paused, so it only queues: nothing is sent from a test.
+  const hook = ok(await db.rpc("create_webhook", { p_team: team.id, p_url: "https://example.com/hook", p_scope: "all" }));
+  await db.from("webhooks").update({ active: false, paused_reason: "notes test" }).eq("id", hook.id);
 });
 
 after(async () => {
+  await db.from("review_batches").delete().eq("team_id", team.id);
   await db.from("tasks").delete().eq("team_id", team.id);
   await db.from("teams").delete().eq("id", team.id);
 });
@@ -207,6 +215,8 @@ test("a new note is checked before anything is stored, and a bad request is answ
   // A frame that can't be read costs the frame, not the comment.
   const broken = await addNote(r.token, SAM, { body: "Frame is broken", timecode: 3, still: "data:image/jpeg;base64,%%%not base64%%%" });
   assert.deepEqual([broken.status, broken.body.body, broken.body.still_url, broken.body.timecode], [200, "Frame is broken", null, 3]);
+  assert.equal(broken.body.still_failed, true, "and the page is told, so it can say the frame wasn't captured");
+  assert.equal("still_failed" in (await addNote(r.token, SAM, { body: "Frame is fine", timecode: 4, still: STILL })).body, false);
 });
 
 test("a save that is sent again with the same key isn't saved twice", async () => {
@@ -225,6 +235,103 @@ test("a save that is sent again with the same key isn't saved twice", async () =
   assert.notEqual((await addNote(r.token, SAM, { body: "Once" })).body.id, first.body.id);
 });
 
+test("approving a review that completes its task: the task is done first, and the webhooks say so in that order", async () => {
+  const r = await publish("Completes", "&completes_task=1");
+  const sent = await decide(r.token, SAM, "approve");
+  assert.deepEqual([sent.status, sent.body.completed_task], [200, true], sent.text);
+  const queued = (await events(r.task.id)).filter((e) => ["task.status", "review.decided"].includes(e.event_type));
+  assert.deepEqual(queued.map((e) => [e.event_type, e.payload.task.status]), [["task.status", "done"], ["review.decided", "done"]]);
+  assert.deepEqual([queued[1].payload.review.decision, queued[1].payload.review.decided_by], ["approved", "Sam"]);
+  // One comment, as the runner and the inbox expect it: a reviewer's, on the review, not yet delivered.
+  const [comment, ...more] = await decisionsOf(r.task.id);
+  assert.equal(more.length, 0);
+  assert.deepEqual([comment.author, comment.author_name, comment.review_id, comment.delivered_at], ["reviewer", "Sam", r.id, null]);
+  assert.equal(comment.body, `Approved "Completes".\n\nThis approval completes CC-${r.task.id}: it's now marked done, so there's nothing more to do on it.`);
+  const log = ok(await db.from("task_events").select("body").eq("task_id", r.task.id).eq("actor", "reviewer"));
+  assert.deepEqual(log.map((e) => e.body), ['done: Sam approved "Completes"']);
+
+  // Asking for changes leaves the task as it was, in the row and in what the webhook says.
+  const c = await publish("Stays open", "&completes_task=1");
+  assert.equal((await decide(c.token, SAM, "changes", { message: "Not yet" })).status, 200);
+  assert.equal(ok(await db.from("tasks").select("status").eq("id", c.task.id).single()).status, "in_progress");
+  const quiet = (await events(c.task.id)).filter((e) => ["task.status", "review.decided"].includes(e.event_type));
+  assert.deepEqual(quiet.map((e) => [e.event_type, e.payload.task.status, e.payload.review?.decision]), [["review.decided", "in_progress", "changes_requested"]]);
+});
+
+test("the same decision sent twice is decided once; a new one decides again; an overtaken one changes nothing", async () => {
+  const r = await publish("Idempotent", "&completes_task=1");
+  await addNote(r.token, SAM, { body: "Trim the end", timecode: 4 });
+  const first = key();
+  const a = await decide(r.token, SAM, "approve", { client_key: first });
+  const again = await decide(r.token, SAM, "approve", { client_key: first });
+  assert.deepEqual([a.status, again.status], [200, 200]);
+  assert.deepEqual(again.body, a.body, "the second answer is the first one, completed_task included");
+  assert.equal(a.body.completed_task, true);
+  const decided = async () => (await events(r.task.id)).filter((e) => e.event_type === "review.decided").length;
+  assert.deepEqual([(await decisionsOf(r.task.id)).length, await decided()], [1, 1]);
+  // Both at once, as a double click that got past the page would be.
+  const k = key();
+  const both = await Promise.all([decide(r.token, ALEX, "changes", { client_key: k, name: "Alex" }), decide(r.token, ALEX, "changes", { client_key: k, name: "Alex" })]);
+  assert.deepEqual(both.map((b) => b.status), [200, 200]);
+  assert.deepEqual([(await decisionsOf(r.task.id)).length, await decided()], [2, 2], "a different key is a new decision, made once");
+
+  // Sam's page, still waiting on its first answer, asks again after Alex decided: Alex's decision stands.
+  const late = await decide(r.token, SAM, "approve", { client_key: first });
+  assert.equal(late.status, 409, late.text);
+  assert.deepEqual([late.body.decided, late.body.stale, late.body.status, late.body.decided_by], [true, true, "changes_requested", "Alex"]);
+  assert.deepEqual([(await decisionsOf(r.task.id)).length, await decided()], [2, 2]);
+  assert.equal((await call("GET", `/r/${r.token}/data`)).body.review.status, "changes_requested");
+  // Without a key, as before this: every request is a decision.
+  assert.equal((await decide(r.token, SAM, "approve")).status, 200);
+  assert.equal((await decide(r.token, SAM, "approve")).status, 200);
+  assert.equal((await decisionsOf(r.task.id)).length, 4);
+});
+
+test("a second decision hands over only what is new, and a decision's message is never taken for a note", async () => {
+  const r = await publish("Twice decided");
+  const one = (await addNote(r.token, SAM, { body: "Colour is cold", timecode: 61.25 })).body;
+  assert.equal((await decide(r.token, SAM, "changes", { message: "First pass" })).status, 200);
+  const [firstDecision] = await decisionsOf(r.task.id);
+  assert.equal(firstDecision.body, 'Changes requested on "Twice decided": First pass\n\nNotes:\n- [1:01.3] Colour is cold');
+  assert.ok((await row(one.id)).bundled_at, "the note is marked as handed over");
+  // The runner types the decision into the session, which is what used to make it look like a note.
+  await db.from("task_comments").update({ delivered_at: new Date().toISOString() }).eq("id", firstDecision.id);
+
+  // A note that was being written while the first decision was made: older than the decision by the
+  // clock, but not handed over by it. It goes with the next one instead of being lost.
+  const raced = (await call("POST", `/r/${r.token}/notes`, ALEX, { name: "Alex", body: "Music too loud", quote: "the  quoted\nwords", quote_start: 3 })).body;
+  await db.from("task_comments").update({ created_at: new Date(Date.parse(firstDecision.created_at) - 60_000).toISOString() }).eq("id", raced.id);
+  assert.equal((await row(raced.id)).bundled_at, null);
+
+  const page = (await call("GET", `/r/${r.token}/data`, SAM)).body;
+  assert.deepEqual(page.notes.map((n) => n.body), ["Music too loud", "Colour is cold"], "the page lists the notes, not the decision");
+  assert.equal((await decide(r.token, SAM, "changes")).status, 200);
+  const second = (await decisionsOf(r.task.id))[1];
+  assert.equal(second.body, 'Changes requested on "Twice decided".\n\nNotes:\n- On "the quoted words": Music too loud (Alex)');
+  // And a third, with nothing new, says only itself.
+  assert.equal((await decide(r.token, SAM, "approve")).status, 200);
+  assert.equal((await decisionsOf(r.task.id))[2].body, 'Approved "Twice decided".');
+  assert.equal((await call("GET", `/r/${r.token}/data`)).body.notes.length, 2);
+});
+
+test("a Worker from before this keeps working: its rows are told apart as they are written", async () => {
+  const r = await publish("Old writer");
+  // As that Worker writes a note and then a decision: no review_kind, no bundled_at.
+  const insert = async (extra) => ok(await db.from("task_comments").insert({ task_id: r.task.id, author: "reviewer", author_name: "Sam", review_id: r.id, ...extra }).select().single());
+  const note = await insert({ body: "Old note", delivered_at: new Date().toISOString() });
+  assert.deepEqual([note.review_kind, note.bundled_at], ["note", null]);
+  await db.from("reviews").update({ status: "changes_requested", decided_by: "Sam", decided_at: new Date(Date.now() + 1000).toISOString() }).eq("id", r.id);
+  const decision = await insert({ body: 'Changes requested on "Old writer".\n\nNotes:\n- Old note' });
+  assert.equal(decision.review_kind, "decision");
+  assert.ok((await row(note.id)).bundled_at, "the notes that decision read are marked as handed over");
+  // So the next decision, by this Worker, doesn't send the old note again.
+  assert.equal((await decide(r.token, SAM, "approve")).status, 200);
+  assert.equal((await decisionsOf(r.task.id)).at(-1).body, 'Approved "Old writer".');
+  // A comment that has nothing to do with a review is left alone.
+  const plain = ok(await db.from("task_comments").insert({ task_id: r.task.id, author: "agent", body: "Working on it" }).select().single());
+  assert.equal(plain.review_kind, null);
+});
+
 test("the page's script parses, never prints a response body, and says what was decided", async () => {
   const r = await publish("Page");
   const res = await fetch(`${BASE}/r/${team.key}/${r.token}`);
@@ -236,4 +343,14 @@ test("the page's script parses, never prints a response body, and says what was 
   assert.equal(script.match(/res\.text\(\)/g).length, 2);
   assert.equal(/"Couldn't (save|send): " \+/.test(script), false);
   for (const id of ["outcome", "outcomeText", "redecide", "locked"]) assert.ok(html.includes(`id="${id}"`), id);
+  assert.match(script, /client_key: decisionKey\.key/, "a decision carries its key");
+
+  // The batch page decides through the same route, with a key of its own and no body ever shown.
+  const made = await call("POST", "/api/batches", { authorization: `Bearer ${UPLOAD}`, "content-type": "application/json" }, { title: `Notes ${run}`, reviews: [r.token] });
+  assert.equal(made.status, 200, made.text);
+  const batchHtml = await (await fetch(made.body.url)).text();
+  const batchScript = batchHtml.slice(batchHtml.indexOf("<script>") + 8, batchHtml.lastIndexOf("</script>"));
+  assert.doesNotThrow(() => new vm.Script(batchScript));
+  assert.match(batchScript, /client_key: newKey\(\)/);
+  assert.equal(/"Couldn't send: " \+ \(await res\.text\(\)\)/.test(batchScript), false);
 });

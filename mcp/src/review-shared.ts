@@ -23,11 +23,18 @@ export async function guarded(request: Request, handle: () => Promise<Response |
   try {
     return await handle();
   } catch (err) {
-    const { pathname } = new URL(request.url);
-    // The path names a private link; its last segments are enough to tell the route.
-    console.error("review route threw", request.method, pathname.replace(/[A-Za-z0-9_-]{20,}/g, "<token>"), err);
+    logThrown("review route threw", request, err);
     return json({ error: "Something went wrong on our side. Try again." }, 500);
   }
+}
+
+// One line per failure, findable in the Worker's logs by its label or its route: the method, the path with
+// any private token taken out (/r/<token>/notes), and the error with its stack.
+export function logThrown(label: string, request: Request, err: unknown) {
+  let route = "?";
+  try { route = new URL(request.url).pathname.replace(/[A-Za-z0-9_-]{20,}/g, "<token>"); } catch { /* an address that can't be read is still logged */ }
+  const error = err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : { message: String(err) };
+  console.error(JSON.stringify({ label, method: request.method, route, error }));
 }
 
 export const randomToken = () => {

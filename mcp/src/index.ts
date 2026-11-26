@@ -6,7 +6,7 @@ import { handleAgentMail, type EmailEnv } from "./email";
 import { handleInbound } from "./inbound";
 import { handleReview, type ReviewEnv } from "./review";
 import { handleReviewList } from "./review-list";
-import { guarded } from "./review-shared";
+import { guarded, logThrown } from "./review-shared";
 import { buildServer } from "./tools";
 import { runWebhookCron } from "./webhooks";
 
@@ -134,7 +134,7 @@ export default {
     try {
       return await provider.fetch(request, env as AuthEnv, ctx);
     } catch (err) {
-      console.error("worker threw", request.method, new URL(request.url).pathname.replace(/[A-Za-z0-9_-]{20,}/g, "<token>"), err);
+      logThrown("worker threw", request, err);
       return new Response(JSON.stringify({ error: "Something went wrong on our side. Try again." }), { status: 500, headers: { "Content-Type": "application/json" } });
     }
   },
