@@ -235,10 +235,9 @@ async function data(db: SupabaseClient, batch: Batch & { team: { key: string; na
 
   // Frame notes left on the single page that haven't gone to the agent yet: the next decision sends them.
   const { data: notes } = cards.length
-    ? await db.from("task_comments").select("review_id,created_at").in("review_id", cards.map((c) => c.review.id)).not("delivered_at", "is", null)
+    ? await db.from("task_comments").select("review_id").in("review_id", cards.map((c) => c.review.id)).eq("review_kind", "note").is("bundled_at", null)
     : { data: [] };
-  const waiting = (r: BatchReview) =>
-    (notes ?? []).filter((n) => n.review_id === r.id && (!r.decided_at || new Date(n.created_at) > new Date(r.decided_at))).length;
+  const waiting = (r: BatchReview) => (notes ?? []).filter((n) => n.review_id === r.id).length;
 
   return json({
     batch: { title: batch.title, team: batch.team },
@@ -506,17 +505,45 @@ function settle(item, status, who) {
 }
 
 // The request the review page's Approve and Request changes buttons make, to the same address.
-// keepalive lets it finish when it's sent as the page is being left.
+// keepalive lets it finish when it's sent as the page is being left. It carries a key of its own, as the
+// review page's does: the server decides once per key, so when no proper answer comes back (nothing, a
+// 5xx, something that isn't JSON) the same request is simply sent again, twice at most, and again with
+// the same key if the person then asks for the same thing.
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+const newKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
 async function send(item, decision, message, who, before) {
   item.busy = true; item.state = "Sending…"; render();
-  let failure = null, reply = {};
-  try {
-    const res = await fetch("/r/" + item.token + "/decision", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: who, decision, message }), keepalive: true });
-    if (res.ok) reply = await res.json();
-    else { failure = (await res.text()) || String(res.status); try { failure = JSON.parse(failure).error || failure; } catch {} }
-  } catch (e) { failure = String(e.message || e); }
+  // The key stays on the card until there is a definite answer, so sending the same decision again after
+  // answers were lost (a click on the same button) is still the same decision. Another decision, or another
+  // message, is a new one.
+  if (!item.sendKey || item.sendKey.decision !== decision || item.sendKey.message !== message) item.sendKey = { key: newKey(), decision, message };
+  const body = JSON.stringify({ name: who, decision, message, client_key: item.sendKey.key });
+  let failure = null, reply = null, status = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await pause(attempt === 1 ? 700 : 2000);
+    reply = null; status = 0;
+    try {
+      const res = await fetch("/r/" + item.token + "/decision", { method: "POST", headers: { "Content-Type": "application/json" }, body, keepalive: true });
+      status = res.status;
+      // Read as JSON or not at all: an error page from the network in between is never shown.
+      try { reply = JSON.parse(await res.text()); } catch {}
+      if (reply === null || typeof reply !== "object") reply = null;
+    } catch {}
+    if (reply && status < 500) break;
+  }
+  const sent = reply && status >= 200 && status < 300;
+  // Decided, or refused in so many words: either way this request is finished with.
+  if (reply && status < 500) item.sendKey = null;
+  if (!sent) failure = !reply || status >= 500 ? "no proper answer from the server. Try again: it won’t be decided twice."
+    : typeof reply.error === "string" ? reply.error.slice(0, 240) : "the server refused (" + status + ").";
   item.busy = false;
+  // The answer says the review is decided, though not by this request (someone else's decision came after
+  // ours): the card shows what stands, with the reason, not what it showed before.
+  if (!sent && reply && reply.decided) {
+    Object.assign(item, { status: reply.status || item.status, decided_by: reply.decided_by || item.decided_by, notes: 0, state: failure }); render();
+    await load();
+    return;
+  }
   if (failure) {
     Object.assign(item, before, { state: "Couldn't send: " + failure }); render();
     // A refusal usually means the cut changed under this tab (a newer version, or this one withdrawn): show

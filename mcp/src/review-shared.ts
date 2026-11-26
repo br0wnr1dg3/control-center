@@ -7,6 +7,36 @@ export type ReviewEnv = Env & { MEDIA: R2Bucket; UPLOAD_TOKEN: string };
 export const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 
+// A request's JSON body as an object, whatever was sent: nothing, something that isn't JSON, or JSON that
+// isn't an object (null, a list) all read as {}. Fields are then checked one by one, with `text` for strings,
+// so a wrong type is a missing field and not an exception.
+export async function readJson(request: Request): Promise<Record<string, unknown>> {
+  const value: unknown = await request.json().catch(() => null);
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+export const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+
+// Nothing a review route does should reach the visitor as Cloudflare's "Worker threw exception" page, which a
+// page's script can only show as raw HTML. Whatever is thrown is logged and answered as JSON, which the pages
+// read as "try again".
+export async function guarded(request: Request, handle: () => Promise<Response | null>): Promise<Response | null> {
+  try {
+    return await handle();
+  } catch (err) {
+    logThrown("review route threw", request, err);
+    return json({ error: "Something went wrong on our side. Try again." }, 500);
+  }
+}
+
+// One line per failure, findable in the Worker's logs by its label or its route: the method, the path with
+// any private token taken out (/r/<token>/notes), and the error with its stack.
+export function logThrown(label: string, request: Request, err: unknown) {
+  let route = "?";
+  try { route = new URL(request.url).pathname.replace(/[A-Za-z0-9_-]{20,}/g, "<token>"); } catch { /* an address that can't be read is still logged */ }
+  const error = err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : { message: String(err) };
+  console.error(JSON.stringify({ label, method: request.method, route, error }));
+}
+
 export const randomToken = () => {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

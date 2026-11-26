@@ -230,7 +230,8 @@ test("approving a superseded version has to be confirmed; the comment and the we
   assert.equal(ok(await comments()).at(-1).body, 'Approved "Cut v1".');
 
   const confirmed = await decide(v2.token, { decision: "approve", confirm_superseded: true });
-  assert.deepEqual(await confirmed.json(), { ok: true, status: "approved", completed_task: true });
+  const reply = await confirmed.json();
+  assert.deepEqual({ ...reply, decided_at: typeof reply.decided_at }, { ok: true, status: "approved", decided_by: "Sam", decided_at: "string", completed_task: true });
   assert.match(ok(await comments()).at(-1).body, /^Approved "Cut v2" \(version 2, superseded by version 1\)\./);
 
   const sent = ok(await db.from("webhook_deliveries").select("event_type,payload").eq("task_id", task.id).like("event_type", "review.%").order("id"));

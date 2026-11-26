@@ -7,6 +7,7 @@
 //   GET  /r/<token>/file                                  the file (Range requests, for scrubbing)
 //   GET  /r/<token>/data                                  review, task and notes as JSON
 //   POST /r/<token>/notes                                 a note, at a timecode with a still or on a quoted passage (from these pages only)
+//   PATCH, DELETE /r/<token>/notes/<id>                   change or remove a note: its writer's browser only, and only until a decision
 //   GET  /r/<token>/still/<name>                          a commented frame
 //   POST /r/<token>/decision                              approve / request changes (from these pages only, or Bearer UPLOAD_TOKEN)
 //   (review-list.ts)                                      /reviews/<team>/<token>: each team's table of its reviews
@@ -15,7 +16,10 @@
 // The link is the access control (a long random token), which is fine for the owner and their team; the team
 // key in the path is only there so a link says whose work it is, and is ignored when matching. Notes
 // are stored already delivered; the decision is posted to the task as one comment listing them, so a
-// waiting agent gets the whole review at once. With completes_task, approving also marks the task done,
+// waiting agent gets the whole review at once. Nothing copies a note anywhere before that, which is why a
+// note can be changed or removed until the decision and not after (the X-Review-Owner secret: see
+// ownerHash). The decision itself is one transaction in Postgres (decide_review), and a request that
+// carries a client_key can arrive twice without deciding twice. With completes_task, approving also marks the task done,
 // which frees whatever was waiting on it (task_dependencies); the runner still delivers the decision to
 // the session before asking it to clean up.
 //
@@ -26,7 +30,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { addToNamedBatch } from "./batch";
-import { database, escapeHtml, fromOwnPage, json, mayUpload, PAGE_HEADERS, randomToken, reviewPath, teamKey, tokenOf, type ReviewEnv } from "./review-shared";
+import { database, escapeHtml, fromOwnPage, json, mayUpload, readJson, text, PAGE_HEADERS, randomToken, reviewPath, teamKey, tokenOf, type ReviewEnv } from "./review-shared";
 
 export type { ReviewEnv };
 
@@ -49,12 +53,6 @@ type Review = {
   is_current: boolean;
 };
 
-const formatTime = (seconds: number) => {
-  const m = Math.floor(seconds / 60);
-  const s = (seconds % 60).toFixed(1).padStart(4, "0");
-  return `${m}:${s}`;
-};
-
 export async function handleReview(request: Request, env: ReviewEnv): Promise<Response | null> {
   const url = new URL(request.url);
   if (url.pathname === "/api/publish") return publish(request, env, url);
@@ -65,7 +63,9 @@ export async function handleReview(request: Request, env: ReviewEnv): Promise<Re
   if (!match) return null;
   const [, teamInPath, token, rest = ""] = match;
   const db = database(env);
-  const { data: review } = await db.from("reviews").select("*").eq("token", token).maybeSingle<Review>();
+  const { data: review, error } = await db.from("reviews").select("*").eq("token", token).maybeSingle<Review>();
+  // The database not answering isn't the review not existing: a page that asked can try again.
+  if (error) return json({ error: "The review couldn't be read just now. Try again." }, 503);
   if (!review) return new Response("Not found", { status: 404 });
 
   if (rest === "" && request.method === "GET") {
@@ -75,13 +75,16 @@ export async function handleReview(request: Request, env: ReviewEnv): Promise<Re
     return page(review);
   }
   if (rest === "/file") return serveObject(request, env, review.object_key, review.content_type);
-  if (rest === "/data") return data(db, review);
-  if ((rest === "/notes" || rest === "/decision") && request.method === "POST") {
+  if (rest === "/data") return data(request, db, review);
+  const noteId = rest.match(/^\/notes\/(\d{1,15})$/);
+  const changesNote = noteId && (request.method === "PATCH" || request.method === "DELETE");
+  if (((rest === "/notes" || rest === "/decision") && request.method === "POST") || changesNote) {
     if (!(await fromOwnPage(request, env))) return json({ error: "Notes and decisions are accepted only from Control Center's own pages." }, 403);
+    if (noteId) return request.method === "PATCH" ? editNote(request, db, review, Number(noteId[1])) : deleteNote(request, env, db, review, Number(noteId[1]));
     return rest === "/notes" ? addNote(request, env, db, review) : decide(request, db, review);
   }
   const still = rest.match(/^\/still\/([a-f0-9-]+\.jpg)$/);
-  if (still) return serveObject(request, env, `${review.object_key.replace(/\/[^/]+$/, "")}/stills/${still[1]}`, "image/jpeg");
+  if (still) return serveObject(request, env, `${stillsDir(review)}/${still[1]}`, "image/jpeg");
   return new Response("Not found", { status: 404 });
 }
 
@@ -214,17 +217,45 @@ type VersionRow = Pick<Review, "token" | "title" | "status" | "decided_by" | "co
   task: { team: { key: string } | null } | null;
 };
 
-async function data(db: SupabaseClient, review: Review) {
+// A note's writer is a browser, not a person: the page makes a random secret once, keeps it in that browser's
+// storage and sends it as X-Review-Owner. Only its hash is stored with the note, and only the same secret
+// changes or removes it, so knowing a note's id (they are small numbers) is not enough.
+const OWNER_SECRET = /^[A-Za-z0-9_-]{32,128}$/;
+async function ownerHash(request: Request): Promise<string | null> {
+  const secret = request.headers.get("X-Review-Owner") ?? "";
+  if (!OWNER_SECRET.test(secret)) return null;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const NOTE_MAX = 5000;
+const TIMECODE_MAX = 1_000_000; // seconds: eleven days, far past any cut, and far inside what the timecode's label can be made from
+const NOTE_COLUMNS = "id,author,author_name,body,timecode,still_url,quote,quote_start,created_at,edited_at,owner_hash";
+type NoteRow = {
+  id: number; author: string; author_name: string | null; body: string; timecode: number | null; still_url: string | null;
+  quote: string | null; quote_start: number | null; created_at: string; edited_at: string | null; owner_hash: string | null;
+};
+// What a page is given: never the hash, only whether the note is this browser's.
+const noteOut = (n: NoteRow, hash: string | null) => ({
+  id: n.id, author: n.author, author_name: n.author_name, body: n.body, timecode: n.timecode, still_url: n.still_url,
+  quote: n.quote, quote_start: n.quote_start, created_at: n.created_at, edited_at: n.edited_at,
+  mine: Boolean(hash && n.owner_hash && n.owner_hash === hash),
+});
+const stillsDir = (review: Review) => `${review.object_key.replace(/\/[^/]+$/, "")}/stills`;
+
+async function data(request: Request, db: SupabaseClient, review: Review) {
+  const hash = await ownerHash(request);
   const [task, notes, versions, others] = await Promise.all([
     db.from("tasks").select("id,title,status,team:teams(key,name)").eq("id", review.task_id).single(),
     db
       .from("task_comments")
-      .select("id,author,author_name,body,timecode,still_url,quote,quote_start,created_at")
+      .select(NOTE_COLUMNS)
       .eq("review_id", review.id)
-      .not("delivered_at", "is", null)
+      .eq("review_kind", "note") // a decision's message is the task's, not one of the review's comments
       .order("timecode", { ascending: true, nullsFirst: true })
       .order("quote_start", { ascending: true, nullsFirst: true })
-      .order("created_at"),
+      .order("created_at")
+      .returns<NoteRow[]>(),
     db
       .from("reviews")
       .select("token,title,status,decided_by,content_type,object_key,created_at,version,note,is_current,task:tasks(team:teams(key))")
@@ -234,6 +265,8 @@ async function data(db: SupabaseClient, review: Review) {
     // What else is on the task: the current version of each other piece.
     db.from("reviews").select("token,title").eq("task_id", review.task_id).eq("is_current", true).neq("piece_id", review.piece_id).order("created_at"),
   ]);
+  // A page that drew this as "no comments" or "no task" would be showing something untrue.
+  if (task.error || notes.error || versions.error) return json({ error: "The review couldn't be read just now. Try again." }, 503);
   const chain = versions.data ?? [];
   const newest = chain[0]?.version ?? review.version;
   return json({
@@ -243,6 +276,7 @@ async function data(db: SupabaseClient, review: Review) {
       content_type: review.content_type,
       filename: review.object_key.split("/").pop(),
       decided_by: review.decided_by,
+      decided_at: review.decided_at,
       completes_task: review.completes_task,
       token: review.token,
       version: review.version,
@@ -251,7 +285,7 @@ async function data(db: SupabaseClient, review: Review) {
       created_at: review.created_at,
     },
     task: task.data,
-    notes: notes.data ?? [],
+    notes: (notes.data ?? []).map((n) => noteOut(n, hash)),
     // Newest first. A version can be on another task (version_of), so each carries its own address.
     versions: chain.map((v) => ({
       token: v.token,
@@ -272,32 +306,47 @@ async function data(db: SupabaseClient, review: Review) {
 }
 
 async function addNote(request: Request, env: ReviewEnv, db: SupabaseClient, review: Review) {
-  const input = (await request.json().catch(() => ({}))) as {
-    name?: string;
-    body?: string;
-    timecode?: number;
-    still?: string;
-    quote?: string;
-    quote_start?: number;
-  };
-  const body = input.body?.trim();
-  const name = input.name?.trim().slice(0, 60);
+  const input = await readJson(request);
+  const body = text(input.body)?.trim();
+  const name = text(input.name)?.trim().slice(0, 60);
   if (!body || !name) return json({ error: "name and body are required" }, 400);
+  if (body.length > NOTE_MAX) return json({ error: `A comment can be at most ${NOTE_MAX} characters.` }, 400);
+  // Refused rather than stored: no cut is that long. (Not a number, negative or not finite is no timecode at all, as before.)
+  if (typeof input.timecode === "number" && input.timecode > TIMECODE_MAX) return json({ error: "That timecode is past the end of any video." }, 400);
+  const hash = await ownerHash(request);
 
-  let stillUrl: string | null = null;
-  if (input.still?.startsWith("data:image/jpeg;base64,")) {
-    const bytes = Uint8Array.from(atob(input.still.split(",")[1]), (c) => c.charCodeAt(0));
-    if (bytes.byteLength < 5_000_000) {
-      const file = `${crypto.randomUUID()}.jpg`;
-      await env.MEDIA.put(`${review.object_key.replace(/\/[^/]+$/, "")}/stills/${file}`, bytes, {
-        httpMetadata: { contentType: "image/jpeg" },
-      });
-      stillUrl = `${env.PUBLIC_URL}/r/${review.token}/still/${file}`;
+  // The page retries a save whose answer never arrived, with the same key: the note that save made is the answer.
+  const clientKey = /^[A-Za-z0-9-]{8,64}$/.test(text(input.client_key) ?? "") ? text(input.client_key)! : null;
+  const saved = () => db.from("task_comments").select(NOTE_COLUMNS).eq("review_id", review.id).eq("client_key", clientKey!).maybeSingle<NoteRow>();
+  if (clientKey) {
+    const { data: earlier } = await saved();
+    if (earlier) return json(noteOut(earlier, hash));
+  }
+
+  // The frame is a nicety; the comment and its timecode are the point. So a still that can't be read or
+  // stored (R2 throws rather than answering) costs the still, not the comment.
+  let stillUrl: string | null = null, stillFile: string | null = null, stillFailed = false;
+  const still = text(input.still);
+  if (still?.startsWith("data:image/jpeg;base64,") && still.length < 7_000_000) {
+    try {
+      const bytes = Uint8Array.from(atob(still.slice(still.indexOf(",") + 1)), (c) => c.charCodeAt(0));
+      if (bytes.byteLength < 5_000_000) {
+        const file = `${crypto.randomUUID()}.jpg`;
+        await env.MEDIA.put(`${stillsDir(review)}/${file}`, bytes, { httpMetadata: { contentType: "image/jpeg" } });
+        stillFile = file;
+        stillUrl = `${env.PUBLIC_URL}/r/${review.token}/still/${file}`;
+      }
+    } catch (err) {
+      stillFailed = true;
+      console.error("review note: still not stored", review.id, err);
     }
   }
-  const timecode = typeof input.timecode === "number" && Number.isFinite(input.timecode) ? input.timecode : null;
-  const quote = input.quote?.trim().slice(0, 2000) || null;
-  const quoteStart = quote && Number.isInteger(input.quote_start) && input.quote_start! >= 0 ? input.quote_start! : null;
+  const dropStill = async () => {
+    if (stillFile) await env.MEDIA.delete(`${stillsDir(review)}/${stillFile}`).catch((err) => console.error("review note: still not removed", review.id, err));
+  };
+  const timecode = typeof input.timecode === "number" && Number.isFinite(input.timecode) && input.timecode >= 0 ? input.timecode : null;
+  const quote = text(input.quote)?.trim().slice(0, 2000) || null;
+  const quoteStart = quote && typeof input.quote_start === "number" && Number.isInteger(input.quote_start) && input.quote_start >= 0 ? input.quote_start : null;
   const { data: note, error } = await db
     .from("task_comments")
     .insert({
@@ -310,104 +359,104 @@ async function addNote(request: Request, env: ReviewEnv, db: SupabaseClient, rev
       still_url: stillUrl,
       quote,
       quote_start: quoteStart,
+      owner_hash: hash,
+      client_key: clientKey,
+      review_kind: "note",
       delivered_at: new Date().toISOString(), // reaches the agent with the decision, not one by one
     })
-    .select("id,author,author_name,body,timecode,still_url,quote,quote_start,created_at")
-    .single();
-  return error ? json({ error: error.message }, 500) : json(note);
+    .select(NOTE_COLUMNS)
+    .single<NoteRow>();
+  if (error) {
+    await dropStill();
+    // The same send arrived twice at once: the other one saved it.
+    if (clientKey && error.code === "23505") {
+      const { data: earlier } = await saved();
+      if (earlier) return json(noteOut(earlier, hash));
+    }
+    console.error("review note: not saved", review.id, error.message);
+    return json({ error: "The comment couldn't be saved just now. Try again." }, 500);
+  }
+  // The page says so, rather than the frame just not being there.
+  return json({ ...noteOut(note, hash), ...(stillFailed ? { still_failed: true } : {}) });
+}
+
+// Why a change was refused, as edit_review_note and delete_review_note report it.
+const REFUSED: Record<string, [string, number]> = {
+  not_found: ["That comment isn't on this review.", 404],
+  not_owner: ["A comment can only be changed from the browser it was written in.", 403],
+  decided: ["This review has been decided, so its comments can no longer be changed.", 409],
+};
+const refused = (code: unknown) => {
+  const [error, status] = REFUSED[String(code)] ?? ["The comment couldn't be changed.", 400];
+  return json({ error, ...(code === "decided" ? { decided: true } : {}) }, status);
+};
+
+async function editNote(request: Request, db: SupabaseClient, review: Review, noteId: number) {
+  const hash = await ownerHash(request);
+  if (!hash) return refused("not_owner");
+  const body = text((await readJson(request)).body)?.trim();
+  if (!body) return json({ error: "body is required" }, 400);
+  if (body.length > NOTE_MAX) return json({ error: `A comment can be at most ${NOTE_MAX} characters.` }, 400);
+  const { data: result, error } = await db.rpc("edit_review_note", { p_review: review.id, p_note: noteId, p_owner_hash: hash, p_body: body });
+  if (error) {
+    console.error("review note: edit failed", review.id, error.message);
+    return json({ error: "The comment couldn't be saved just now. Try again." }, 500);
+  }
+  // The function only changes a note whose hash matched, and doesn't send the hash back.
+  return result?.note ? json({ ...noteOut(result.note as NoteRow, hash), mine: true }) : refused(result?.error);
+}
+
+async function deleteNote(request: Request, env: ReviewEnv, db: SupabaseClient, review: Review, noteId: number) {
+  const hash = await ownerHash(request);
+  if (!hash) return refused("not_owner");
+  const { data: result, error } = await db.rpc("delete_review_note", { p_review: review.id, p_note: noteId, p_owner_hash: hash });
+  if (error) {
+    console.error("review note: delete failed", review.id, error.message);
+    return json({ error: "The comment couldn't be deleted just now. Try again." }, 500);
+  }
+  if (result?.deleted === undefined) return refused(result?.error);
+  // Its frame goes with it. The note is already gone, so a still that can't be removed is only logged.
+  const file = typeof result.still_url === "string" ? result.still_url.match(/\/still\/([a-f0-9-]+\.jpg)$/)?.[1] : null;
+  if (file) await env.MEDIA.delete(`${stillsDir(review)}/${file}`).catch((err) => console.error("review note: still not removed", review.id, err));
+  return json({ ok: true, deleted: result.deleted });
 }
 
 async function decide(request: Request, db: SupabaseClient, review: Review) {
-  const input = (await request.json().catch(() => ({}))) as { name?: string; decision?: string; message?: string; confirm_superseded?: boolean };
-  const name = input.name?.trim().slice(0, 60);
+  const input = await readJson(request);
+  const name = text(input.name)?.trim().slice(0, 60);
   const decision = input.decision === "approve" ? "approved" : input.decision === "changes" ? "changes_requested" : null;
   if (!name || !decision) return json({ error: "name and decision are required" }, 400);
+  const message = text(input.message)?.trim().slice(0, NOTE_MAX) || null;
+  // The page's id for this one decision. Sent again with the same key (the answer was lost), it is the same
+  // decision, not a second one.
+  const key = /^[A-Za-z0-9-]{8,64}$/.test(text(input.client_key) ?? "") ? text(input.client_key)! : null;
 
   // Approving a version that isn't the one that counts has to be meant. Checked here, not only on the
   // page, so a batch grid or an old tab that still thinks this version is current can't do it by accident.
-  let supersededBy: number | null = null;
-  if (!review.is_current) {
+  if (!review.is_current && decision === "approved" && input.confirm_superseded !== true) {
     const { data: current } = await db.from("reviews").select("version").eq("piece_id", review.piece_id).eq("is_current", true).maybeSingle();
-    supersededBy = current?.version ?? null;
-    if (decision === "approved" && input.confirm_superseded !== true) {
-      return json({
-        error: `Version ${review.version} is superseded${supersededBy ? `: version ${supersededBy} is the current one` : ""}. Approving it has to be confirmed.`,
-        superseded: true,
-        current_version: supersededBy,
-      }, 409);
-    }
+    const supersededBy: number | null = current?.version ?? null;
+    return json({
+      error: `Version ${review.version} is superseded${supersededBy ? `: version ${supersededBy} is the current one` : ""}. Approving it has to be confirmed.`,
+      superseded: true,
+      current_version: supersededBy,
+    }, 409);
   }
 
-  // Every note since this version's last decision goes to the agent in one message.
-  let notesQuery = db
-    .from("task_comments")
-    .select("author_name,body,timecode,still_url,quote")
-    .eq("review_id", review.id)
-    .not("delivered_at", "is", null)
-    .order("timecode", { ascending: true, nullsFirst: true })
-    .order("quote_start", { ascending: true, nullsFirst: true })
-    .order("created_at");
-  if (review.decided_at) notesQuery = notesQuery.gt("created_at", review.decided_at);
-  const { data: notes } = await notesQuery;
-
-  const lines = (notes ?? []).map(
-    (n) =>
-      `- ${n.timecode !== null ? `[${formatTime(n.timecode)}] ` : ""}${n.quote ? `On "${clip(n.quote)}": ` : ""}${n.body}${n.author_name !== name ? ` (${n.author_name})` : ""}` +
-      (n.still_url ? ` frame: ${n.still_url}` : ""),
-  );
-  const message = input.message?.trim();
-  // The agent should know when the decision is about a version that no longer counts.
-  const which = review.is_current ? "" : ` (version ${review.version}, superseded${supersededBy ? ` by version ${supersededBy}` : ""})`;
-  const headline = (decision === "approved" ? `Approved "${review.title}"` : `Changes requested on "${review.title}"`) + which;
-  // Done before the comment, which only says so if it worked. Should the runner look in between, it asks
-  // the session to clean up first and types the decision on its next poll: the window stays open for that.
-  let completed = false;
-  let completeError: string | null = null;
-  if (decision === "approved" && review.completes_task) {
-    // A task that was cancelled in the meantime stays cancelled.
-    const { data: finished, error } = await db
-      .from("tasks")
-      .update({ status: "done", question: null })
-      .eq("id", review.task_id)
-      .not("status", "in", "(done,cancelled)")
-      .select("id");
-    completeError = error?.message ?? null;
-    completed = Boolean(finished?.length);
+  // All of it is one transaction (decide_review): the task is completed if this approval does that, the
+  // review is marked, and the comment that hands the agent every waiting note is written, in that order, so
+  // webhooks see the task done before review.decided. Either all of it happened or none of it did, which is
+  // what makes asking again safe.
+  const { data: done, error } = await db.rpc("decide_review", { p_review: review.id, p_status: decision, p_name: name, p_message: message, p_key: key });
+  if (error || !done) {
+    console.error("review decision: not recorded", review.id, error?.message);
+    return json({ error: "The decision couldn't be recorded just now. Nothing was decided; try again." }, 500);
   }
-  const body = [
-    headline + (message ? `: ${message}` : "."),
-    lines.length ? `Notes:\n${lines.join("\n")}` : "",
-    completed ? `This approval completes CC-${review.task_id}: it's now marked done, so there's nothing more to do on it.` : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-
-  await db.from("reviews").update({ status: decision, decided_by: name, decided_at: new Date().toISOString() }).eq("id", review.id);
-  const { error } = await db.from("task_comments").insert({
-    task_id: review.task_id,
-    author: "reviewer",
-    author_name: name,
-    body,
-    review_id: review.id,
-  });
-  if (error) return json({ error: error.message }, 500);
-  if (completed) {
-    await db.from("task_events").insert({
-      task_id: review.task_id,
-      kind: "status",
-      body: `done: ${name} approved "${review.title}"`,
-      actor: "reviewer",
-    });
-  }
-  // The decision is recorded and on its way to the agent, but the reviewer should know the task isn't done.
-  if (completeError) return json({ error: `Decision sent, but the task couldn't be marked done: ${completeError}` }, 500);
-  return json({ ok: true, status: decision, completed_task: completed });
+  const stands = { status: done.status as string, decided_by: done.decided_by as string | null, decided_at: done.decided_at as string | null };
+  // This request was an earlier decision of this page's, and someone has decided since: theirs stands.
+  if (done.stale) return json({ error: "This review has been decided again since; that decision stands and yours wasn't sent a second time.", decided: true, stale: true, ...stands }, 409);
+  return json({ ok: true, ...stands, completed_task: Boolean(done.completed_task) });
 }
-
-const clip = (text: string) => {
-  const flat = text.replace(/\s+/g, " ");
-  return flat.length > 160 ? `${flat.slice(0, 157)}...` : flat;
-};
 
 // ---------- Page ----------
 
@@ -510,13 +559,19 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   #decision p { margin: 0; }
   #decision .row { justify-content: flex-end; }
   #decisionState:empty { display: none; }
-  #decisionState, #addState.err { color: var(--warn); }
+  #decisionState, #addState.err, .editState.err { color: var(--warn); }
+  /* What was decided, in place of the two buttons: a strip under the bar, so it is as plain on a phone as on a desk. */
+  .outcome { flex: none; display: flex; align-items: center; gap: 6px 12px; flex-wrap: wrap; padding: 8px 12px; border-bottom: 1px solid var(--line); font-weight: 500; }
+  .outcome.approved { background: color-mix(in srgb, var(--ok) 16%, var(--panel)); }
+  .outcome.changes_requested { background: color-mix(in srgb, var(--warn) 16%, var(--panel)); }
+  .outcome a { white-space: nowrap; }
+  .outcome button { font-weight: 400; }
   #confirmText, #newer { border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); border-radius: 7px; padding: 7px 10px; }
   #keys { padding: 10px 12px; }
   #keys dl { margin: 0; display: grid; grid-template-columns: auto auto; gap: 5px 14px; align-items: center; }
   #keys dt { white-space: nowrap; } #keys dd { margin: 0; color: var(--muted); }
   kbd { font: inherit; font-size: 11.5px; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--edge); background: var(--bg); }
-  #toast { position: fixed; z-index: 40; top: 58px; left: 50%; transform: translateX(-50%); max-width: calc(100vw - 24px); padding: 7px 12px; border-radius: 7px;
+  #toast { position: fixed; z-index: 40; top: 100px; left: 50%; transform: translateX(-50%); max-width: calc(100vw - 24px); padding: 7px 12px; border-radius: 7px;
            background: var(--raise); border: 1px solid var(--edge); box-shadow: 0 8px 24px rgba(0, 0, 0, .5); }
 
   /* ---- Player pane ---- */
@@ -600,13 +655,21 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   button.tc:hover { background: color-mix(in srgb, var(--accent) 30%, transparent); }
   .noteBody { white-space: pre-wrap; overflow-wrap: anywhere; }
   .note img { flex: none; width: 64px; align-self: flex-start; border-radius: 4px; cursor: pointer; }
+  /* Edit and Delete, on a comment written in this browser while the review is undecided. */
+  .noteActs { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+  .lk, .lk:hover { padding: 0; border: 0; background: none; color: var(--muted); font-size: 12px; line-height: 16px; }
+  .lk:hover { color: var(--text); text-decoration: underline; }
+  .editBox { min-height: 56px; margin-top: 2px; }
+  .editState { flex: 1 1 100%; font-size: 12px; color: var(--muted); }
+  .editState:empty { display: none; }
+  #locked { flex: none; margin: 0; padding: 8px 14px; border-bottom: 1px solid var(--line); }
   /* The composer stays at the foot of the panel while the list above it scrolls. */
   .composer { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 10px 12px 12px; border-top: 1px solid var(--line); background: var(--panel); }
   .composeBox { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); padding: 8px; }
   .composeBox:focus-within { border-color: var(--accent); }
   .composeBox textarea { border: 0; border-radius: 0; background: none; padding: 0; min-height: 40px; resize: none; }
   .composeBox .row { margin-top: 6px; flex-wrap: nowrap; }
-  #addState { min-width: 0; }
+  #addState { min-width: 0; white-space: normal; }
 
   /* A touch keyboard zooms the page for type under 16px. */
   @media (pointer: coarse) { textarea, input[type="text"] { font-size: 16px; } #volume { display: none; } .track .marker { width: 12px; height: 12px; margin-left: -6px; } }
@@ -662,6 +725,7 @@ const REVIEW_PAGE = String.raw`<!doctype html>
     <button class="ok" id="approve" aria-haspopup="dialog" aria-expanded="false">Approve</button>
   </div>
 </header>
+<div class="outcome" id="outcome" role="status" hidden><span id="outcomeText"></span><a id="outcomeOpen" href="#" hidden></a><span class="spacer"></span><button class="small" id="redecide" title="Approve or request changes again">Change decision</button></div>
 <div class="pop menu" id="versionMenu" hidden><div class="popHead" id="versionCount"></div><div id="versionList"></div></div>
 <div class="pop menu" id="othersMenu" hidden><div class="popHead">Also on this task</div><div id="othersList"></div></div>
 <div class="pop" id="keys" hidden>
@@ -683,7 +747,7 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   <a id="confirmOpen" href="#" hidden></a>
   <p class="muted" id="decisionHint" hidden>Approving completes this task.</p>
   <input type="text" id="decisionName" maxlength="60" placeholder="Your name (shown on your decision)" aria-label="Your name" hidden>
-  <textarea id="message" placeholder="Optional message to the agent" aria-label="Optional message to the agent"></textarea>
+  <textarea id="message" maxlength="5000" placeholder="Optional message to the agent" aria-label="Optional message to the agent"></textarea>
   <p id="decisionState" role="alert"></p>
   <div class="row"><button id="confirmNo">Cancel</button><button id="confirmYes"></button></div>
 </div>
@@ -713,12 +777,13 @@ const REVIEW_PAGE = String.raw`<!doctype html>
   </section>
   <aside>
     <div class="panelHead"><strong id="count">Comments</strong><span class="muted">as <a href="#" id="who" title="Change the name on your comments"></a></span></div>
+    <p class="muted" id="locked" hidden>This review has been decided, so its comments can no longer be edited or deleted: they went to the editor as the change notes.</p>
     <div id="notes"><p class="muted empty">No comments yet.</p></div>
     <div class="composer">
       <input type="text" id="nameInput" maxlength="60" placeholder="Your name (shown on your comments)" aria-label="Your name" hidden>
       <div id="pending" hidden><div class="quote" id="pendingQuote"></div><button id="clearQuote" title="Make it a general comment">×</button></div>
       <div class="composeBox">
-        <textarea id="body" rows="2" placeholder="Leave a comment (Enter sends)" aria-label="Comment"></textarea>
+        <textarea id="body" rows="2" maxlength="5000" placeholder="Leave a comment (Enter sends)" aria-label="Comment"></textarea>
         <div class="row"><span class="tc" id="stamp" title="The comment is pinned to this frame" hidden>0:00.0</span><span class="muted" id="addState"></span><span class="spacer"></span><button class="primary small" id="add" data-icon="send">Send</button></div>
       </div>
     </div>
@@ -736,6 +801,43 @@ const fmt = (s) => Math.floor(s / 60) + ":" + (s % 60).toFixed(1).padStart(4, "0
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
                 set: (k, v) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} } };
 let video = null, doc = null, docHtml = "", notes = [], pending = null, mode = null;
+
+// ---------- Requests ----------
+
+// There is no sign-in, so a comment is "mine" when it was written in this browser: a random secret made here
+// once, kept in this browser's storage and sent with every request. The server keeps only its hash with each
+// comment and asks for the same secret to change or delete one. Clearing the browser's data, or another
+// browser or device, is someone else as far as the page can tell.
+const random = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => b.toString(16).padStart(2, "0")).join("");
+let owner = store.get("cc-review-owner") || "";
+if (!/^[A-Za-z0-9_-]{32,128}$/.test(owner)) { owner = random(32); store.set("cc-review-owner", owner); }
+const HEADERS = { "Content-Type": "application/json", "X-Review-Owner": owner };
+
+// Every request the page makes goes through here, and none of them throws or hands back a raw body: the
+// answer is JSON or it is nothing. An answer that never came, wasn't JSON (an error page from the network in
+// between) or was a 5xx is "unsure", and is asked again after a short wait, up to "retries" times. What is
+// sent has to be safe to send twice, and is: a comment and a decision each carry a key the server remembers,
+// and an edit and a delete come to the same thing the second time.
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+async function call(path, opts, retries, onRetry) {
+  for (let attempt = 0; ; attempt++) {
+    let status = 0, data = null;
+    try {
+      const res = await fetch(path, opts);
+      status = res.status;
+      try { data = JSON.parse(await res.text()); } catch { data = null; }
+      if (data === null || typeof data !== "object") data = null;
+    } catch { status = 0; }
+    const ok = status >= 200 && status < 300 && data !== null;
+    const unsure = !ok && (status === 0 || status >= 500 || (status < 300 && data === null));
+    if (ok || !unsure || attempt >= (retries || 0)) return { ok, unsure, status, data };
+    if (onRetry) onRetry();
+    await wait(attempt ? 2000 : 700);
+  }
+}
+// What to tell the person: the server's own words for a refusal (they are short and written to be read),
+// and otherwise the line given. Never a body.
+const why = (r, line) => (!r.unsure && r.data && typeof r.data.error === "string" ? r.data.error.slice(0, 240) : line);
 
 // Icons are drawn here, so the page asks for nothing but the review itself.
 const svg = (d, filled) => '<svg viewBox="0 0 16 16" aria-hidden="true" ' +
@@ -970,8 +1072,12 @@ $("quoteBtn").onclick = () => {
 $("clearQuote").onclick = () => setPending(null);
 
 async function setupText(type, filename) {
-  const res = await fetch(base + "/file");
-  const src = await res.text();
+  let src = null;
+  for (let attempt = 0; attempt < 3 && src === null; attempt++) {
+    if (attempt) await wait(attempt * 800);
+    try { const res = await fetch(base + "/file"); if (res.ok) src = await res.text(); else if (res.status < 500) break; } catch {}
+  }
+  if (src === null) { $("stage").innerHTML = '<p class="download muted">Couldn’t load the file. Reload the page to try again.</p>'; return; }
   const isMarkdown = /markdown/.test(type) || /\.(md|markdown)$/i.test(filename || "");
   $("stage").innerHTML = '<article class="doc" id="doc"></article>';
   doc = $("doc");
@@ -987,9 +1093,19 @@ async function setupText(type, filename) {
 // ---------- Comments ----------
 
 const day = (iso) => new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+const dayTime = (iso) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+
+// The comment being edited or about to be deleted, if any: { id, mode: "edit" | "delete", text, state, err, busy, focus }.
+// Kept here, not in the list, because the list is redrawn whenever the review is read again.
+let editing = null;
 
 function render() {
   const list = mode === "text" ? [...notes].sort((a, b) => (a.at ?? -1) - (b.at ?? -1)) : notes;
+  // A comment can be changed by the browser that wrote it until the review is decided. After that the agent
+  // has them all as the change notes, so they are read-only, and the panel says so.
+  const open = Boolean(review) && review.status === "open";
+  if (editing && (!open || !notes.some((n) => n.id === editing.id && n.mine))) editing = null;
+  $("locked").hidden = !review || open || !notes.some((n) => n.mine);
   $("count").textContent = "Comments (" + notes.length + ")";
   $("notes").innerHTML = list.length ? "" : '<p class="muted empty">No comments yet.</p>';
   for (const n of list) {
@@ -998,10 +1114,11 @@ function render() {
     const missing = doc && n.at === null;
     el.innerHTML = '<div><div class="noteHead"><span class="author">' + esc(n.author_name || n.author) + '</span>' +
       (n.timecode !== null ? '<button class="tc" title="Go to this frame">' + fmt(n.timecode) + '</button>' : "") +
-      (n.created_at ? '<span class="when">' + day(n.created_at) + '</span>' : "") + '</div>' +
+      (n.created_at ? '<span class="when"' + (n.edited_at ? ' title="Edited ' + esc(dayTime(n.edited_at)) + '"' : "") + '>' + day(n.created_at) + (n.edited_at ? " · edited" : "") + '</span>' : "") + '</div>' +
       (n.quote ? '<div class="quote' + (missing ? ' missing" title="Not found in this version' : "") + '">“' + esc(n.quote) + '”</div>' : "") +
-      '<div class="noteBody">' + esc(n.body) + '</div></div>' +
-      (n.still_url ? '<img src="' + n.still_url + '" alt="" title="The frame this comment is on">' : "");
+      '<div class="noteBody">' + esc(n.body) + '</div><div class="noteActs" hidden></div></div>' +
+      (n.still_url ? '<img src="' + esc(n.still_url) + '" alt="" title="The frame this comment is on">' : "");
+    if (n.mine && open) noteActions(el, n);
     // The timecode and the still go to the comment's frame; the text is left alone, so it can be selected.
     const seek = () => { if (video && n.timecode !== null) { video.pause(); video.currentTime = n.timecode; focusNote(n.id, false); } };
     el.querySelector(".tc")?.addEventListener("click", seek);
@@ -1020,6 +1137,74 @@ function render() {
   }
   $("toggle").textContent = document.body.classList.contains("collapsed") ? "Show comments" + (notes.length ? " (" + notes.length + ")" : "") : "Hide comments";
   markNow(true);
+}
+
+// Edit and Delete under a comment of one's own. Editing swaps the text for a box in place; deleting asks
+// once, there, since it also removes the comment's frame and can't be undone.
+function noteActions(el, n) {
+  const acts = el.querySelector(".noteActs"), e = editing && editing.id === n.id ? editing : null;
+  const button = (label, cls, on) => { const b = document.createElement("button"); b.textContent = label; b.className = cls; b.onclick = on; b.disabled = Boolean(e && e.busy); acts.appendChild(b); return b; };
+  const state = () => { const s = document.createElement("span"); s.className = "editState" + (e.err ? " err" : ""); s.setAttribute("role", "status"); s.textContent = e.state || ""; acts.appendChild(s); };
+  acts.hidden = false;
+  if (!e) {
+    button("Edit", "lk", () => { editing = { id: n.id, mode: "edit", text: n.body, state: "", focus: true }; render(); });
+    button("Delete", "lk", () => { editing = { id: n.id, mode: "delete", state: "", focus: true }; render(); });
+    return;
+  }
+  const cancel = () => { if (!e.busy) { editing = null; render(); } };
+  if (e.mode === "edit") {
+    const box = document.createElement("textarea");
+    box.className = "editBox"; box.maxLength = 5000; box.value = e.text; box.setAttribute("aria-label", "Edit your comment"); box.disabled = Boolean(e.busy);
+    box.addEventListener("input", () => { e.text = box.value; });
+    box.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); saveEdit(); }
+      if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); cancel(); }
+    });
+    el.querySelector(".noteBody").replaceWith(box);
+    state();
+    button("Cancel", "small", cancel);
+    button("Save", "primary small", saveEdit);
+    if (e.focus) { e.focus = false; box.focus(); box.setSelectionRange(box.value.length, box.value.length); }
+  } else {
+    const ask = document.createElement("span"); ask.className = "muted"; ask.textContent = "Delete this comment" + (n.still_url ? " and its frame" : "") + "?"; acts.appendChild(ask);
+    state();
+    const keep = button("Keep", "small", cancel);
+    button("Delete", "warn small", removeNote);
+    if (e.focus) { e.focus = false; keep.focus(); }
+  }
+}
+async function saveEdit() {
+  const e = editing;
+  if (!e || e.busy || e.mode !== "edit") return;
+  const body = e.text.trim();
+  if (!body) { e.err = true; e.state = "A comment needs some text. Delete it instead?"; render(); return; }
+  const at = token;
+  e.busy = true; e.err = false; e.state = "Saving…"; render();
+  const r = await call(base + "/notes/" + e.id, { method: "PATCH", headers: HEADERS, body: JSON.stringify({ body }) }, 2);
+  if (at !== token || editing !== e) return; // another version was opened meanwhile
+  e.busy = false;
+  if (!r.ok) {
+    // Decided (or deleted) meanwhile: the page is read again, which puts the comment back as it is.
+    if (r.status === 409 || r.status === 404) { editing = null; toast(why(r, "That comment can no longer be changed.")); load(); return; }
+    e.err = true; e.focus = true; e.state = why(r, "Couldn’t save your change. It’s still in the box; try again."); render(); return;
+  }
+  const i = notes.findIndex((n) => n.id === e.id);
+  if (i >= 0) notes[i] = r.data;
+  editing = null; highlight(); render();
+}
+async function removeNote() {
+  const e = editing;
+  if (!e || e.busy || e.mode !== "delete") return;
+  const at = token;
+  e.busy = true; e.err = false; e.state = "Deleting…"; render();
+  const r = await call(base + "/notes/" + e.id, { method: "DELETE", headers: HEADERS }, 2);
+  if (at !== token || editing !== e) return;
+  e.busy = false;
+  if (r.status === 409) { editing = null; toast(why(r, "That comment can no longer be deleted.")); load(); return; }
+  // Not there any more is what was asked for (an earlier try may have done it).
+  if (!r.ok && r.status !== 404) { e.err = true; e.state = why(r, "Couldn’t delete your comment. Try again."); render(); return; }
+  notes = notes.filter((n) => n.id !== e.id);
+  editing = null; highlight(); render();
 }
 
 // The comment the video has most recently reached is lit, in the list and on the timeline, as it plays. The list
@@ -1047,31 +1232,41 @@ function still() {
 }
 
 let sending = false; // Enter pressed twice sends once
+// One key per comment, sent again with every retry of it (by the page or by the person), so a save whose
+// answer was lost isn't saved twice. Changing the text makes it a different comment.
+let sendKey = null;
 async function add() {
   const body = $("body").value.trim();
   if (!body || sending) return;
   const who = nameFrom($("nameInput"));
   $("addState").className = "muted";
   if (!who) { $("addState").textContent = "Add your name to send."; return; }
+  const at = token;
+  if (!sendKey || sendKey.body !== body || sendKey.token !== at) sendKey = { key: random(16), body, token: at };
   sending = true; $("add").disabled = true; $("addState").textContent = "Saving…";
-  const payload = { name: who, body };
-  if (video) { payload.timecode = video.currentTime; payload.still = still(); }
+  const payload = { name: who, body, client_key: sendKey.key };
+  if (video) { payload.timecode = video.currentTime; try { payload.still = still(); } catch {} }
   if (pending) { payload.quote = pending.quote; payload.quote_start = pending.start; }
-  let res;
-  try { res = await fetch(base + "/notes", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); }
-  catch { res = null; }
+  const r = await call(base + "/notes", { method: "POST", headers: HEADERS, body: JSON.stringify(payload) }, 2,
+    () => { if (at === token) $("addState").textContent = "Saving… trying again"; });
   sending = false; $("add").disabled = false;
-  if (!res) { $("addState").className = "muted err"; $("addState").textContent = "Couldn't save: no connection."; return; }
-  if (!res.ok) { $("addState").className = "muted err"; $("addState").textContent = "Couldn't save: " + (await res.text()); return; }
-  if (!res.url.endsWith(base + "/notes")) return; // another version was opened meanwhile; it's saved on its own
-  const saved = await res.json();
-  notes.push(saved); notes.sort((a, b) => (a.timecode ?? -1) - (b.timecode ?? -1));
-  $("body").value = ""; $("addState").textContent = "";
+  if (at !== token) return; // another version was opened meanwhile; it's saved on its own
+  // What was typed stays in the box whatever went wrong.
+  if (!r.ok) { $("addState").className = "muted err"; $("addState").textContent = why(r, "Couldn’t save your comment. It’s still in the box; try again."); return; }
+  const saved = r.data;
+  sendKey = null;
+  if (!notes.some((n) => n.id === saved.id)) notes.push(saved);
+  notes.sort((a, b) => (a.timecode ?? -1) - (b.timecode ?? -1));
+  $("body").value = "";
+  // The comment is in; only its picture of the frame isn't, and the timecode still says where it is.
+  $("addState").textContent = saved.still_failed ? "Comment saved, but the frame capture wasn’t." : "";
   setPending(null); render();
   const el = document.querySelector('.note[data-id="' + saved.id + '"]');
   if (el) reveal(el);
 }
 $("add").onclick = add;
+// A failure is about the last try: it goes once the text is being changed.
+$("body").addEventListener("input", () => { if (!sending && $("addState").classList.contains("err")) { $("addState").className = "muted"; $("addState").textContent = ""; } });
 $("body").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); add(); } });
 
 // ---------- Decision ----------
@@ -1110,23 +1305,76 @@ $("changes").onclick = () => openDecision("changes");
 $("confirmNo").onclick = () => { const a = popped && popped.anchor; closePop(); if (a) a.focus(); };
 $("confirmYes").onclick = () => decide(deciding, deciding === "approve" && review && !review.current);
 
+// One decision at a time: the buttons are off while it is on its way, and a second click does nothing.
+// Each decision has a key of its own, sent again with every retry of it (the page's, or the person's after
+// a failure), and the server decides once per key: the same request again is answered as the first was.
+// So a lost answer is simply asked for again. Changing what is decided, or the message, is a new decision.
+let decidingNow = false, decisionKey = null;
 async function decide(decision, confirmed) {
+  if (decidingNow || !review) return;
   const who = nameFrom($("decisionName"));
   if (!who) { $("decisionState").textContent = "Add your name first."; placePop(); return; }
-  const buttons = [$("approve"), $("changes"), $("confirmYes")];
+  const at = token, want = decision === "approve" ? "approved" : "changes_requested", message = $("message").value;
+  const same = decisionKey && decisionKey.token === at && decisionKey.decision === decision && decisionKey.message === message && decisionKey.who === who;
+  if (!same) decisionKey = { key: random(16), token: at, decision, message, who };
+  const buttons = [$("approve"), $("changes"), $("confirmYes"), $("confirmNo"), $("redecide")];
+  decidingNow = true;
   for (const b of buttons) b.disabled = true;
-  const res = await fetch(base + "/decision", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: who, decision, message: $("message").value, confirm_superseded: Boolean(confirmed) }) });
+  $("decisionState").textContent = "Sending…"; placePop();
+  const r = await call(base + "/decision", { method: "POST", headers: HEADERS,
+    body: JSON.stringify({ name: who, decision, message, confirm_superseded: Boolean(confirmed), client_key: decisionKey.key }) }, 2,
+    () => { if (at === token) { $("decisionState").textContent = "Sending… trying again"; placePop(); } });
+  decidingNow = false;
   for (const b of buttons) b.disabled = false;
+  if (at !== token) return;
+  $("decisionState").textContent = "";
+  const reply = r.data || {};
+  // Someone else decided after this decision of ours had landed: theirs stands, and the page shows it.
+  if (r.status === 409 && reply.decided) { decisionKey = null; redeciding = false; closePop(); toast(why(r, "This review has been decided again since.")); load(); return; }
   // This version stopped being the current one while the page was open: say so, and ask.
-  if (res.status === 409) { await load(); if (!isOpen($("decision"))) showPop($("decision"), $("approve")); renderDecision(); $("confirmNo").focus(); return; }
-  if (!res.ok) { $("decisionState").textContent = "Couldn't send: " + (await res.text()); placePop(); return; }
+  if (r.status === 409) { await load(); if (!isOpen($("decision"))) showPop($("decision"), $("approve")); renderDecision(); $("confirmNo").focus(); return; }
+  if (!r.ok) {
+    // The key is kept, so pressing the button again asks about the same decision rather than making another.
+    $("decisionState").textContent = r.unsure ? "Couldn’t confirm that your decision arrived. Send it again: it won’t be decided twice."
+      : why(r, "Couldn’t send your decision. Try again.");
+    placePop(); return;
+  }
+  // Shown at once, from the answer itself: the buttons give way to what was decided, by whom and when.
+  decisionKey = null;
   $("message").value = ""; closePop();
-  const reply = await res.json();
-  toast(decision !== "approve" ? "Sent. The agent is working on the next version."
+  review.status = reply.status || want; review.decided_by = reply.decided_by || who; review.decided_at = reply.decided_at || new Date().toISOString();
+  redeciding = false;
+  renderOutcome(); render();
+  toast(decision !== "approve" ? "Sent. The editor has your notes."
     : reply.completed_task ? "Approved. The task is done." : "Approved. The agent will wrap up.", listPath);
   load();
 }
+
+// What the review's state is, wherever it shows: the badge in the bar and, once decided, the strip that
+// takes the place of Approve and Request changes. An old version that had changes requested points at the
+// one that counts now.
+let redeciding = false;
+function renderOutcome() {
+  if (!review) return;
+  const decided = review.status !== "open", current = chain.find((v) => v.current), moved = !review.current && current ? current : null;
+  $("status").textContent = { open: "Waiting for review", approved: "Approved", changes_requested: "Changes requested" }[review.status];
+  $("status").className = "badge " + review.status;
+  $("outcome").hidden = !decided;
+  $("approve").hidden = $("changes").hidden = decided && !redeciding;
+  $("redecide").hidden = redeciding;
+  if (!decided) { redeciding = false; return; }
+  if (!redeciding && isOpen($("decision")) && !decidingNow) closePop();
+  const by = (review.decided_by ? " by " + review.decided_by : "") + (review.decided_at ? " at " + dayTime(review.decided_at) : "") + ".";
+  const newer = moved && moved.version > review.version;
+  $("outcome").className = "outcome " + review.status;
+  $("outcomeText").textContent = review.status === "approved"
+    ? "Approved" + by + (moved ? " This version is superseded: version " + moved.version + " is the current one." : "")
+    : "Changes requested" + by + (newer ? " Version " + moved.version + " has been published since." : moved ? " Version " + moved.version + " is the current one."
+        : " The editor has your notes and will publish a new version.");
+  $("outcomeOpen").hidden = !moved;
+  if (moved) { $("outcomeOpen").textContent = "Open version " + moved.version; $("outcomeOpen").href = moved.path; $("outcomeOpen").onclick = (e) => openVersion(e, moved); }
+}
+$("redecide").onclick = () => { redeciding = true; renderOutcome(); $("changes").focus(); };
 
 // ---------- Media ----------
 
@@ -1156,7 +1404,8 @@ function openVersion(e, v) {
 }
 function show(next) {
   token = next; base = "/r/" + token;
-  notes = []; review = null; nowId = null;
+  notes = []; review = null; nowId = null; editing = null; redeciding = false; sendKey = null; decisionKey = null;
+  $("outcome").hidden = true; $("approve").hidden = $("changes").hidden = false;
   video.pause(); video.src = base + "/file";
   $("download").href = base + "/file";
   closePop(); $("message").value = ""; $("decisionState").textContent = ""; $("addState").textContent = "";
@@ -1174,7 +1423,8 @@ function renderVersions() {
   $("superseded").hidden = review.current;
   $("superseded").title = current ? "Version " + current.version + " is the current one" : "";
   $("versionBtn").hidden = !many;
-  $("newer").hidden = !many || review.current || !current;
+  // Once decided, the strip under the bar says where the current version is; this banner would say it twice.
+  $("newer").hidden = !many || review.current || !current || review.status !== "open";
   if (!many) { if (isOpen($("versionMenu"))) closePop(); return; }
 
   $("versionName").textContent = "v" + review.version;
@@ -1381,13 +1631,14 @@ function setupMedia(type, filename) {
 
 async function load() {
   const asked = token;
-  const d = await (await fetch(base + "/data")).json();
+  const r = await call(base + "/data", { headers: HEADERS }, 2);
   if (asked !== token) return; // another version was opened while this was on its way
+  const d = r.data;
+  // Not read: what's on screen stays as it was, and a page with nothing on it yet says why.
+  if (!r.ok || !d.review || !d.task || !d.versions) { if (!review) toast("Couldn’t load this review. Reload the page to try again."); return; }
   review = d.review; chain = d.versions;
   const team = d.task.team, link = (t) => "/r/" + (team ? team.key + "/" : "") + t;
   $("title").textContent = review.title; $("title").title = review.title; document.title = review.title + " · Review";
-  $("status").textContent = { open: "Waiting for review", approved: "Approved", changes_requested: "Changes requested" }[review.status];
-  $("status").className = "badge " + review.status;
   $("approve").title = review.completes_task ? "Approving completes this task" : "";
   // The team's review list, if this browser has opened it: the list page leaves its address here. This page is
   // never sent it, so a review link alone doesn't lead to the team's other reviews.
@@ -1404,6 +1655,7 @@ async function load() {
   if (!$("stage").firstChild) setupMedia(review.content_type, review.filename);
   $("download").download = review.filename || "";
   renderVersions();
+  renderOutcome();
   renderDecision();
   highlight(); render();
 }
