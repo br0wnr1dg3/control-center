@@ -6,6 +6,7 @@ import { handleAgentMail, type EmailEnv } from "./email";
 import { handleInbound } from "./inbound";
 import { handleReview, type ReviewEnv } from "./review";
 import { handleReviewList } from "./review-list";
+import { guarded } from "./review-shared";
 import { buildServer } from "./tools";
 import { runWebhookCron } from "./webhooks";
 
@@ -62,10 +63,10 @@ const authHandler = {
     const url = new URL(request.url);
     if (url.pathname === "/hooks/agentmail") return handleAgentMail(request, env as unknown as EmailEnv, ctx);
     if (url.pathname === "/hooks/inbound") return handleInbound(request, env);
-    const review =
+    const review = await guarded(request, async () =>
       (await handleReview(request, env as unknown as ReviewEnv)) ??
       (await handleBatch(request, env as unknown as ReviewEnv)) ??
-      (await handleReviewList(request, env as unknown as ReviewEnv));
+      (await handleReviewList(request, env as unknown as ReviewEnv)));
     if (review) return review;
     if (url.pathname !== "/authorize") return new Response("Not found", { status: 404 });
 
@@ -128,7 +129,15 @@ const provider = new OAuthProvider<AuthEnv>({
 });
 
 export default {
-  fetch: (request, env, ctx) => provider.fetch(request, env as AuthEnv, ctx),
+  // The last resort: whatever a route lets slip is logged and answered as JSON, not as Cloudflare's error page.
+  fetch: async (request, env, ctx) => {
+    try {
+      return await provider.fetch(request, env as AuthEnv, ctx);
+    } catch (err) {
+      console.error("worker threw", request.method, new URL(request.url).pathname.replace(/[A-Za-z0-9_-]{20,}/g, "<token>"), err);
+      return new Response(JSON.stringify({ error: "Something went wrong on our side. Try again." }), { status: 500, headers: { "Content-Type": "application/json" } });
+    }
+  },
   // Awaited rather than waitUntil, so a failed run shows as failed in the cron's event log.
   scheduled: (event, env) => runWebhookCron(env, event.scheduledTime),
 } satisfies ExportedHandler<Env>;

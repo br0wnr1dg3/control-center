@@ -514,7 +514,11 @@ async function send(item, decision, message, who, before) {
     const res = await fetch("/r/" + item.token + "/decision", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: who, decision, message }), keepalive: true });
     if (res.ok) reply = await res.json();
-    else { failure = (await res.text()) || String(res.status); try { failure = JSON.parse(failure).error || failure; } catch {} }
+    else {
+      // The server's own words when it refused; never a raw body, which for an error page is a screen of HTML.
+      failure = "the server didn’t answer properly (" + res.status + "). Try again.";
+      try { const said = JSON.parse(await res.text()).error; if (typeof said === "string") failure = said.slice(0, 240); } catch {}
+    }
   } catch (e) { failure = String(e.message || e); }
   item.busy = false;
   if (failure) {

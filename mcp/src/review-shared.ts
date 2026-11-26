@@ -7,6 +7,29 @@ export type ReviewEnv = Env & { MEDIA: R2Bucket; UPLOAD_TOKEN: string };
 export const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 
+// A request's JSON body as an object, whatever was sent: nothing, something that isn't JSON, or JSON that
+// isn't an object (null, a list) all read as {}. Fields are then checked one by one, with `text` for strings,
+// so a wrong type is a missing field and not an exception.
+export async function readJson(request: Request): Promise<Record<string, unknown>> {
+  const value: unknown = await request.json().catch(() => null);
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+export const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+
+// Nothing a review route does should reach the visitor as Cloudflare's "Worker threw exception" page, which a
+// page's script can only show as raw HTML. Whatever is thrown is logged and answered as JSON, which the pages
+// read as "try again".
+export async function guarded(request: Request, handle: () => Promise<Response | null>): Promise<Response | null> {
+  try {
+    return await handle();
+  } catch (err) {
+    const { pathname } = new URL(request.url);
+    // The path names a private link; its last segments are enough to tell the route.
+    console.error("review route threw", request.method, pathname.replace(/[A-Za-z0-9_-]{20,}/g, "<token>"), err);
+    return json({ error: "Something went wrong on our side. Try again." }, 500);
+  }
+}
+
 export const randomToken = () => {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

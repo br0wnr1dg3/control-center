@@ -298,7 +298,9 @@ test("deciding from a batch is the review's own decision: comment, inbox, webhoo
   assert.equal(own.status, 404);
 
   const approved = await decide(items[0].token, "approve", "");
-  assert.deepEqual(await approved.json(), { ok: true, status: "approved", completed_task: true });
+  const reply = await approved.json();
+  // The page shows who decided and when straight from this answer.
+  assert.deepEqual({ ...reply, decided_at: typeof reply.decided_at }, { ok: true, status: "approved", decided_by: "Sam", decided_at: "string", completed_task: true });
   assert.equal((await task(first.id)).status, "done", "completes_task still completes the task");
   const comments = ok(await db.from("task_comments").select("author,author_name,body,review_id,delivered_at").eq("task_id", first.id));
   assert.equal(comments.length, 1);
