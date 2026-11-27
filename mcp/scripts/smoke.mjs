@@ -671,6 +671,7 @@ if (!cronRuns) {
     assert(pub?.review.url.endsWith(`/r/${teamKey}/${token}`) && !("token" in pub.review) && pub.review.decision === null, `review.published payload: ${JSON.stringify(pub)}`);
     assert(dec?.review.decision === "approved" && dec.review.decided_by === "Smoke" && dec.review.url === pub.review.url, `review.decided payload: ${JSON.stringify(dec)}`);
     assert(dec.review.version === 1 && dec.review.versions === 1 && dec.review.current === true, `review events say which version: ${JSON.stringify(dec)}`);
+    assert(pub.review.completes_task === false && pub.review.content_type === "text/plain" && dec.review.completes_task === false, `review events say what kind of review it is: ${JSON.stringify(pub)}`);
     console.log("✓ webhooks: review.published and review.decided carry the review's link and decision");
   }
 
