@@ -4,13 +4,17 @@ import SwiftUI
 /// without this the only sign of one is a pill on the board.
 struct ReviewsView: View {
     var store = BoardStore.shared
+    @State private var showAll = false
 
     var body: some View {
-        let waiting = store.awaitingReview
+        let waiting = showAll ? store.awaitingReview : store.myReviews
+        let others = store.awaitingReview.count - store.myReviews.count
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 if waiting.isEmpty {
-                    Text("Nothing is waiting for review.")
+                    Text(!showAll && others > 0
+                         ? "Nothing is waiting for you. \(others) from other apps are under All."
+                         : "Nothing is waiting for review.")
                         .font(.callout).foregroundStyle(.tertiary)
                         .padding(.horizontal, 8).padding(.vertical, 4)
                 }
@@ -37,5 +41,16 @@ struct ReviewsView: View {
         }
         .navigationTitle("Reviews")
         .navigationSubtitle(waiting.isEmpty ? "" : "\(waiting.count) waiting for a decision")
+        .toolbar {
+            ToolbarItemGroup {
+                // Mine leaves out work sent in by other apps: the people who asked for it there review it.
+                Picker("", selection: $showAll) {
+                    Text("Mine").tag(false)
+                    Text("All").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .fixedSize()
+            }
+        }
     }
 }

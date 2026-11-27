@@ -82,6 +82,12 @@ final class BoardStore {
     var awaitingReview: [BoardTask] {
         tasks.filter(\.isAwaitingReview).sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
     }
+    /// The ones that are yours to decide. Work another app sent in (or a piece of it) is reviewed by the
+    /// people who asked for it there, so it's left out; nothing records a reviewer, so this is the rule.
+    var myReviews: [BoardTask] { awaitingReview.filter { !isFromOutside($0) } }
+    private func isFromOutside(_ task: BoardTask) -> Bool {
+        task.externalRef != nil || task.parentId.flatMap(self.task)?.externalRef != nil
+    }
     /// Projects in the current team: ones with tasks plus ones set up in team settings.
     var projects: [String] {
         let specs = projectSpecs.filter { teamFilter == nil || $0.teamId == teamFilter }.map(\.name)

@@ -10,7 +10,7 @@ struct MainWindow: View {
                     .badge(store.attentionCount)
                     .tag(Section.inbox)
                 Label("Reviews", systemImage: "play.rectangle")
-                    .badge(store.awaitingReview.count)
+                    .badge(store.myReviews.count)
                     .tag(Section.reviews)
                 Label("Today", systemImage: "sun.max")
                     .badge(store.onYourPlate.count)
