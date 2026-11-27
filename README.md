@@ -178,8 +178,8 @@ To verify: compute the HMAC over the raw bytes received (before parsing), compar
   },
   // Then, depending on the type:
   "previous_status": "ready", // task.status
-  "review": { "id": 7, "title": "Cut v2", "url": "https://<worker>/r/acme/<token>", "decision": null, "decided_by": null, "decided_at": null, "version": 2, "versions": 2, "current": true, "current_id": 7 },
-  // ^ review.published and review.decided. decision is "approved" or "changes_requested". version is which version of the piece this is, of how many; current is false for a superseded one, and current_id is the review that does count (not always the newest, see "Versions of one piece"). The url is the private review link: anyone with it can open and comment.
+  "review": { "id": 7, "title": "Cut v2", "url": "https://<worker>/r/acme/<token>", "decision": null, "decided_by": null, "decided_at": null, "version": 2, "versions": 2, "current": true, "current_id": 7, "completes_task": true, "content_type": "video/mp4" },
+  // ^ review.published and review.decided. decision is "approved" or "changes_requested". version is which version of the piece this is, of how many; current is false for a superseded one, and current_id is the review that does count (not always the newest, see "Versions of one piece"). completes_task is true for the review whose approval finishes the task (`cc-publish --completes-task`) and content_type is what was uploaded: an agent often publishes notes beside its deliverable, and these two tell them apart. The url is the private review link: anyone with it can open and comment.
   "comment": { "id": 9, "author": "agent", "author_name": null, "body": "Markdown", "created_at": "..." }
   // ^ comment.added. author is me, claude, agent, reviewer or external (one sent through inbound events, so possibly your own: don't mirror those back).
 }
