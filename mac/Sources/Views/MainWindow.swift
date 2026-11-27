@@ -9,6 +9,9 @@ struct MainWindow: View {
                 Label("Inbox", systemImage: "tray")
                     .badge(store.attentionCount)
                     .tag(Section.inbox)
+                Label("Reviews", systemImage: "play.rectangle")
+                    .badge(store.myReviews.count)
+                    .tag(Section.reviews)
                 Label("Today", systemImage: "sun.max")
                     .badge(store.onYourPlate.count)
                     .tag(Section.today)
@@ -47,6 +50,7 @@ struct MainWindow: View {
             } else {
                 switch store.section {
                 case .inbox: InboxView()
+                case .reviews: ReviewsView()
                 case .today: DayView()
                 case .upcoming: UpcomingView()
                 case .board: BoardView(project: nil)
