@@ -11,7 +11,7 @@ export type ListedReview = {
   object_key: string;
   created_at: string;
   version: number;
-  tasks: { id: number; title: string; project: string | null };
+  tasks: { id: number; title: string; project: string | null; status?: string };
 };
 
 export type ListRow = {
@@ -46,7 +46,10 @@ export const shapeRows = (team: string, reviews: ListedReview[]): ListRow[] =>
     project: r.tasks.project?.trim() || null,
     kind: kindLabel(r.content_type, r.object_key.split("/").pop() ?? ""),
     version: r.version,
-    status: r.status,
+    // An undecided review on a task that is finished or cancelled is waiting on nobody: the work ended
+    // another way (a different review was approved, the sender's own review closed the task, the owner
+    // completed it). It stays in the table, under All, as "Task closed".
+    status: r.status === "open" && (r.tasks.status === "done" || r.tasks.status === "cancelled") ? "closed" : r.status,
     sent_at: r.created_at,
     decided_at: r.status === "open" ? null : r.decided_at,
     decided_by: r.status === "open" ? null : r.decided_by,
@@ -60,7 +63,7 @@ export const shapeRows = (team: string, reviews: ListedReview[]): ListRow[] =>
 // latest decision first. A heading sorts by its column, and rows that tie there keep the queue's order.
 // A row with nothing in the column goes last whichever way the column runs.
 export const LIST_ORDER = String.raw`
-const STATUS_RANK = { open: 0, changes_requested: 1, approved: 2 };
+const STATUS_RANK = { open: 0, changes_requested: 1, approved: 2, closed: 3 };
 const when = (value) => (value ? Date.parse(value) || 0 : 0);
 const words = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
 

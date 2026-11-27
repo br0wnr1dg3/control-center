@@ -154,6 +154,16 @@ begin
   -- Read under the review's lock, which every decision holds while it changes the task.
   select status into v_task_status from tasks where id = t.id;
 
+  -- An approval is of the version the sender reviewed. If a newer version has been published since, that
+  -- one is what counts here, and approving the old one would finish the task with the new one never
+  -- looked at. The page asks a person to confirm this; a sender can't be asked, so nothing is decided and
+  -- the answer says which review is current. (A rejection still closes the task: the rework is elsewhere.)
+  if v_outcome = 'approved' and not r.is_current then
+    return jsonb_build_object('task', t.id, 'review', r.id, 'status', r.status, 'decided_by', r.decided_by,
+                              'task_status', v_task_status, 'changed', false, 'reason', 'superseded',
+                              'current_review', (select id from reviews where piece_id = r.piece_id and is_current));
+  end if;
+
   -- Nothing left to do: someone already decided this review and the task is closed, or it is already
   -- approved and that is all an approval asks for. What stands is answered and nothing is written, so
   -- an outcome that arrives after a decision on the page never decides a second time.

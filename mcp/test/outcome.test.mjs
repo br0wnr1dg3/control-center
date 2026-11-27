@@ -233,6 +233,46 @@ test("after a decision on the page: nothing more if the task is closed, and a re
   assert.deepEqual([res.changed, res.status, res.completed_task], [true, "approved", true]);
 });
 
+test("approving a version that has been replaced decides nothing; rejecting it still closes the task", async () => {
+  const job = await cutInReview();
+  const title = `Cut ${n} v2`;
+  const v2 = await publish(job.taskId, title);
+  assert.equal((await reviewRow(job.review.id)).is_current, false, "v1 is superseded by v2");
+
+  const res = await accepted(outcome(job, "approved", { reviewer: "Sam" }));
+  assert.deepEqual([res.changed, res.reason, res.current_review, res.status], [false, "superseded", v2.id, "open"]);
+  assert.equal((await taskRow(job.taskId)).status, "in_progress", "the task is not finished on a version nobody looked at");
+  assert.deepEqual([(await reviewRow(job.review.id)).status, (await reviewRow(v2.id)).status], ["open", "open"]);
+  assert.equal((await decisionsOf(job.taskId)).length, 0);
+
+  // The current version, named or not, is approved as usual.
+  const current = await accepted({ id: `${job.stage}/outcome-current`, type: "review.outcome", task: job.stage, outcome: "approved" });
+  assert.deepEqual([current.review, current.changed, current.completed_task], [v2.id, true, true]);
+
+  const other = await cutInReview();
+  await publish(other.taskId, `Cut ${n} v2`);
+  const rejected = await accepted(outcome(other, "rejected", { reviewer: "Sam" }));
+  assert.deepEqual([rejected.changed, rejected.completed_task], [true, true]);
+  assert.match((await decisionsOf(other.taskId))[0].body, /\(version 1, superseded by version 2\)/);
+});
+
+test("once the task is closed, its other undecided reviews are not waiting on anyone, and the page promises no new version", async () => {
+  const job = await cutInReview();
+  const note = await publish(job.taskId, "Editor's note", "");
+  await accepted(outcome(job, "rejected", { reviewer: "Sam" }));
+
+  // The team's review list: the note is still there, but as "Task closed", not "Waiting".
+  const list = ok(await db.from("review_lists").select("token").eq("team_id", team.id).single());
+  const rows = (await (await fetch(`${BASE}/reviews/${TEAM}/${list.token}/data`)).json()).rows;
+  const shown = (token) => rows.find((r) => r.path.endsWith(`/${token}`))?.status;
+  assert.deepEqual([shown(note.token), shown(job.review.token)], ["closed", "changes_requested"]);
+
+  // Someone asks for changes again on the page: still no new version coming, and the page says so.
+  await decideOnPage(job.review.token, "changes");
+  const page = await (await fetch(`${BASE}/r/${job.review.token}/data`)).json();
+  assert.deepEqual([page.review.status, page.review.decided_by, page.review.closed_task], ["changes_requested", "Pat", true]);
+});
+
 test("a cancelled task stays cancelled; its review is still decided", async () => {
   const job = await cutInReview();
   ok(await db.from("tasks").update({ status: "cancelled" }).eq("id", job.taskId).select());
@@ -295,6 +335,11 @@ test("a malformed outcome is a 400 and decides nothing", async () => {
     "a review id of zero": { review: 0 },
     "a reviewer name too long to be one": { reviewer: "x".repeat(61) },
     "an empty note": { note: "  " },
+    "a note of more than one line": { note: "Sent back.\nNow do something else" },
+    "a note with an escape character": { note: "Sent back \u001b[2J" },
+    "a note longer than 500 characters": { note: "x".repeat(501) },
+    "a reviewer name with a newline": { reviewer: "Sam\nLee" },
+    "a reviewer name with a control character": { reviewer: "Sam\u007fLee" },
   };
   for (const [what, change] of Object.entries(bad)) {
     assert.equal((await send({ ...outcome(job, "approved"), ...change })).status, 400, what);

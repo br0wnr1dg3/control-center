@@ -47,6 +47,17 @@ const envelope = {
     .refine((s) => s !== "agent" && s !== "linear", "is reserved"),
 };
 
+// Words that end up typed into an agent's terminal: one line, no control characters (a newline would
+// start a new prompt line, an escape could drive the terminal).
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+const plainLine = (max: number) =>
+  z
+    .string()
+    .trim()
+    .min(1)
+    .max(max)
+    .refine((s) => !CONTROL_CHARS.test(s), "must be one line with no control characters");
+
 const stageSchema = z.object({ ...taskFields, blocked_by: z.array(externalId).max(100).optional() });
 
 const eventSchema = z.discriminatedUnion("type", [
@@ -94,8 +105,8 @@ const eventSchema = z.discriminatedUnion("type", [
     outcome: z.enum(["approved", "rejected"]),
     // The review's id, as webhooks give it (review.id). Left out: the task's current deliverable.
     review: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
-    reviewer: z.string().trim().min(1).max(60).optional(),
-    note: z.string().trim().min(1).max(5000).optional(),
+    reviewer: plainLine(60).optional(),
+    note: plainLine(500).optional(),
   }),
 ]);
 
