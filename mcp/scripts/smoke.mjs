@@ -462,6 +462,32 @@ if (inboundSecret) {
   assert((await call("list_inbox", {})).some((n) => n.kind === "comment" && n.task.id === parentId), "external comment lands in the inbox");
   console.log("✓ inbound: comment → inbox, as external, can't trigger @agent");
 
+  // review.outcome: the sender's own review decides the review here and closes the task.
+  if (uploadToken) {
+    const sent = await accepted(job("outcome", { stages: [{ id: `outcome-ok-${run}`, title: "Cut A", kind: "human" }, { id: `outcome-back-${run}`, title: "Cut B", kind: "human" }] }));
+    const publishOn = async (taskId) => {
+      const res = await fetch(`${BASE}/api/publish?task=${taskId}&filename=cut.txt&title=Cut&completes_task=1`, {
+        method: "PUT",
+        headers: { authorization: `Bearer ${uploadToken}`, "content-type": "text/plain" },
+        body: "cut",
+      });
+      assert(res.status === 200, `publish for review.outcome: ${res.status}`);
+      return (await res.json()).review_id;
+    };
+    const okId = sent.tasks[`outcome-ok-${run}`], backId = sent.tasks[`outcome-back-${run}`];
+    const okReview = await publishOn(okId), backReview = await publishOn(backId);
+    const approvedOutcome = await accepted({ id: `evt-outcome-ok-${run}`, type: "review.outcome", task: `outcome-ok-${run}`, outcome: "approved", review: okReview, reviewer: "Sam (QA)" });
+    const okTask = await call("get_task", { id: okId });
+    assert(approvedOutcome.changed && approvedOutcome.completed_task && okTask.status === "done" && okTask.comments.at(-1).author === "reviewer", "an approved outcome approves the review and finishes the task");
+    const rejectedOutcome = await accepted({ id: `evt-outcome-back-${run}`, type: "review.outcome", task: `outcome-back-${run}`, outcome: "rejected", review: backReview, reviewer: "Sam (QA)" });
+    const backTask = await call("get_task", { id: backId });
+    assert(rejectedOutcome.status === "changes_requested" && rejectedOutcome.completed_task && backTask.status === "done" && !backTask.awaiting_review, "a rejected outcome closes the task");
+    assert(/don't make or publish another version/.test(backTask.comments.at(-1).body), "and tells the agent not to make another version");
+    assert((await accepted({ id: `evt-outcome-again-${run}`, type: "review.outcome", task: `outcome-back-${run}`, outcome: "rejected", review: backReview })).changed === false, "a second outcome decides nothing");
+    assert((await post({ id: `evt-outcome-reach-${run}`, type: "review.outcome", task: `outcome-ok-${run}`, outcome: "approved", review: backReview })).status === 404, "a review of another task isn't reachable");
+    console.log("✓ inbound: review.outcome → approved finishes the task; rejected closes it without a new version; repeats decide nothing");
+  }
+
   const missingTask = await post({ id: `evt-missing-${run}`, type: "comment", task: "no-such-task", body: "x" });
   assert(missingTask.status === 404, "unknown task");
   const ownersTask = await post({ id: `evt-owner-${run}`, type: "stage.ready", task: String(uploadsId) });

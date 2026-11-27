@@ -51,6 +51,7 @@ type Review = {
   version: number;
   note: string | null;
   is_current: boolean;
+  decision_completed: boolean | null;
 };
 
 export async function handleReview(request: Request, env: ReviewEnv): Promise<Response | null> {
@@ -278,6 +279,9 @@ async function data(request: Request, db: SupabaseClient, review: Review) {
       decided_by: review.decided_by,
       decided_at: review.decided_at,
       completes_task: review.completes_task,
+      // The decision that stands finished the task. With "changes requested" that means the rework is
+      // separate work (an inbound review.outcome), so the page must not promise a new version here.
+      closed_task: review.status !== "open" && review.decision_completed === true,
       token: review.token,
       version: review.version,
       note: review.note,
@@ -1342,7 +1346,7 @@ async function decide(decision, confirmed) {
   // Shown at once, from the answer itself: the buttons give way to what was decided, by whom and when.
   decisionKey = null;
   $("message").value = ""; closePop();
-  review.status = reply.status || want; review.decided_by = reply.decided_by || who; review.decided_at = reply.decided_at || new Date().toISOString();
+  review.status = reply.status || want; review.decided_by = reply.decided_by || who; review.decided_at = reply.decided_at || new Date().toISOString(); review.closed_task = !!reply.completed_task;
   redeciding = false;
   renderOutcome(); render();
   toast(decision !== "approve" ? "Sent. The editor has your notes."
@@ -1370,6 +1374,7 @@ function renderOutcome() {
   $("outcomeText").textContent = review.status === "approved"
     ? "Approved" + by + (moved ? " This version is superseded: version " + moved.version + " is the current one." : "")
     : "Changes requested" + by + (newer ? " Version " + moved.version + " has been published since." : moved ? " Version " + moved.version + " is the current one."
+        : review.closed_task ? " The task was closed with this decision: the changes are being made as separate work."
         : " The editor has your notes and will publish a new version.");
   $("outcomeOpen").hidden = !moved;
   if (moved) { $("outcomeOpen").textContent = "Open version " + moved.version; $("outcomeOpen").href = moved.path; $("outcomeOpen").onclick = (e) => openVersion(e, moved); }
