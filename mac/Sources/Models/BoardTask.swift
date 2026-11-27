@@ -174,6 +174,13 @@ struct BoardTask: Codable, Identifiable, Equatable {
 
     /// The agent has published and is waiting for the decision: started, but nobody is working on it.
     var isAwaitingReview: Bool { status == .in_progress && awaitingReview == true }
+    /// Where to decide it: the newest batch page if the outputs were grouped, else the newest review page.
+    /// Published outputs are added to `links` in order, so the last match is the latest.
+    var reviewLink: URL? {
+        let pages = links.compactMap { URL(string: $0.url) }
+        let last = { (part: String) in pages.last { $0.path.contains(part) } }
+        return last("/b/") ?? last("/r/")
+    }
     /// Its session window closed mid-task (runner.mjs): parked in Needs you to resume, not a question for you.
     var isStopped: Bool { status == .needs_you && question?.hasPrefix("The session window closed") == true }
 

@@ -3,7 +3,7 @@ import Foundation
 import Observation
 
 enum Section: Hashable {
-    case inbox, today, upcoming, board
+    case inbox, reviews, today, upcoming, board
     case project(String)
     case team(Int)  // team settings
 }
@@ -77,6 +77,11 @@ final class BoardStore {
     var needsYou: [BoardTask] { allTasks.filter { $0.status == .needs_you } }
     // Not the ones that have published and are waiting for a decision: nothing is running there.
     var running: [BoardTask] { tasks.filter { $0.status == .in_progress && $0.kind == .agent && !$0.isAwaitingReview } }
+    /// Published and waiting for a decision, newest first. The inbox leaves these out: "ready for review"
+    /// arrives as an agent's note, and a task waiting on a review isn't in Needs you.
+    var awaitingReview: [BoardTask] {
+        tasks.filter(\.isAwaitingReview).sorted { ($0.updatedAt ?? "") > ($1.updatedAt ?? "") }
+    }
     /// Projects in the current team: ones with tasks plus ones set up in team settings.
     var projects: [String] {
         let specs = projectSpecs.filter { teamFilter == nil || $0.teamId == teamFilter }.map(\.name)
@@ -115,10 +120,11 @@ final class BoardStore {
     // MARK: Sync
 
     func start() {
-        // CC_SECTION=inbox|upcoming|board|team:<id> and CC_SELECT=<id> / CC_COMPOSE=1 open a specific view (handy for screenshots).
+        // CC_SECTION=inbox|reviews|upcoming|board|team:<id> and CC_SELECT=<id> / CC_COMPOSE=1 open a specific view (handy for screenshots).
         let env = ProcessInfo.processInfo.environment
         switch env["CC_SECTION"] {
         case "inbox": section = .inbox
+        case "reviews": section = .reviews
         case "upcoming": section = .upcoming
         case "board": section = .board
         case let value? where value.hasPrefix("team:"):

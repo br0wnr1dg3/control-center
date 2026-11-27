@@ -11,7 +11,7 @@ Email (AgentMail webhook) ──────┼─► Cloudflare Worker (MCP + O
 - `supabase/migrations/`: schema (tasks, comments, notifications, teams, projects, repos) and triggers
 - `mcp/`: Cloudflare Worker with the MCP tools, passphrase-gated OAuth (single owner) and email capture
 - `runner/`: picks up ready agent tasks and runs each in its own `claude` session (cmux workspace, git worktree, Remote Control), then cleans up
-- `mac/`: SwiftUI board app: Inbox, Today, Upcoming calendar, board, full-page tasks, team settings
+- `mac/`: SwiftUI board app: Inbox, Reviews, Today, Upcoming calendar, board, full-page tasks, team settings
 
 Built for one person (single owner, service-role access, macOS paths). To run your own:
 
