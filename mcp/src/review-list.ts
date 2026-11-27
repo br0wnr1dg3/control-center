@@ -51,7 +51,7 @@ export async function handleReviewList(request: Request, env: ReviewEnv): Promis
 // for, to know whether any were left out. (Both stay under PostgREST's own cap of 1000 rows a request.)
 const WAITING_SHOWN = 800;
 const DECIDED_SHOWN = 500;
-const COLUMNS = "token,title,status,decided_by,decided_at,content_type,object_key,created_at,version,tasks!inner(id,title,project,team_id)";
+const COLUMNS = "token,title,status,decided_by,decided_at,content_type,object_key,created_at,version,tasks!inner(id,title,project,team_id,status)";
 
 async function data(db: SupabaseClient, team: Team) {
   const current = () => db.from("reviews").select(COLUMNS).eq("is_current", true).eq("tasks.team_id", team.id);
@@ -157,7 +157,7 @@ const store = { get: (k) => { try { return localStorage.getItem(k); } catch { re
                 set: (k, v) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} } };
 const HEADS = [["project", "Project"], ["title", "Title"], ["kind", "Kind"], ["version", "Version"], ["status", "Status"],
                ["sent", "Sent for review"], ["decided", "Decided"], ["task", "Task"]];
-const STATUS = { open: "Waiting", changes_requested: "Changes requested", approved: "Approved" };
+const STATUS = { open: "Waiting", changes_requested: "Changes requested", approved: "Approved", closed: "Task closed" };
 const REFRESH_MS = 25000, TIMEOUT_MS = 15000;
 
 // The review page offers the way back to whoever has been here (it is told nothing about this address otherwise).

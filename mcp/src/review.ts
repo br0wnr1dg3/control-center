@@ -278,6 +278,10 @@ async function data(request: Request, db: SupabaseClient, review: Review) {
       decided_by: review.decided_by,
       decided_at: review.decided_at,
       completes_task: review.completes_task,
+      // The task is finished (or cancelled): nobody is going to make another version on it, whoever asks
+      // for changes now. That is how an inbound review.outcome "rejected" leaves it, and it stays true for
+      // a decision made again on this page afterwards, so the page must not promise a new version.
+      closed_task: task.data?.status === "done" || task.data?.status === "cancelled",
       token: review.token,
       version: review.version,
       note: review.note,
@@ -1342,10 +1346,10 @@ async function decide(decision, confirmed) {
   // Shown at once, from the answer itself: the buttons give way to what was decided, by whom and when.
   decisionKey = null;
   $("message").value = ""; closePop();
-  review.status = reply.status || want; review.decided_by = reply.decided_by || who; review.decided_at = reply.decided_at || new Date().toISOString();
+  review.status = reply.status || want; review.decided_by = reply.decided_by || who; review.decided_at = reply.decided_at || new Date().toISOString(); review.closed_task = review.closed_task || !!reply.completed_task;
   redeciding = false;
   renderOutcome(); render();
-  toast(decision !== "approve" ? "Sent. The editor has your notes."
+  toast(decision !== "approve" ? (review.closed_task ? "Sent. The task is closed, so no new version is coming from it." : "Sent. The editor has your notes.")
     : reply.completed_task ? "Approved. The task is done." : "Approved. The agent will wrap up.", listPath);
   load();
 }
@@ -1370,6 +1374,7 @@ function renderOutcome() {
   $("outcomeText").textContent = review.status === "approved"
     ? "Approved" + by + (moved ? " This version is superseded: version " + moved.version + " is the current one." : "")
     : "Changes requested" + by + (newer ? " Version " + moved.version + " has been published since." : moved ? " Version " + moved.version + " is the current one."
+        : review.closed_task ? " The task is closed, so no new version is coming from it: any changes are separate work."
         : " The editor has your notes and will publish a new version.");
   $("outcomeOpen").hidden = !moved;
   if (moved) { $("outcomeOpen").textContent = "Open version " + moved.version; $("outcomeOpen").href = moved.path; $("outcomeOpen").onclick = (e) => openVersion(e, moved); }

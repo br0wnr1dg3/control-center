@@ -1,4 +1,5 @@
-// Signed inbound events: a trusted app creates job trees, adds stages and advances them (POST /hooks/inbound).
+// Signed inbound events: a trusted app creates job trees, adds stages, advances them and reports what its
+// own review of a deliverable decided (POST /hooks/inbound).
 //
 // Each team has its own secret, the Worker secret INBOUND_SECRET_<TEAM KEY> (uppercase, "-" as "_"); a team
 // without one accepts nothing. The sender signs every request:
@@ -46,6 +47,17 @@ const envelope = {
     .refine((s) => s !== "agent" && s !== "linear", "is reserved"),
 };
 
+// Words that end up typed into an agent's terminal: one line, no control characters (a newline would
+// start a new prompt line, an escape could drive the terminal).
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+const plainLine = (max: number) =>
+  z
+    .string()
+    .trim()
+    .min(1)
+    .max(max)
+    .refine((s) => !CONTROL_CHARS.test(s), "must be one line with no control characters");
+
 const stageSchema = z.object({ ...taskFields, blocked_by: z.array(externalId).max(100).optional() });
 
 const eventSchema = z.discriminatedUnion("type", [
@@ -82,6 +94,19 @@ const eventSchema = z.discriminatedUnion("type", [
     task: externalId,
     body: z.string().min(1).max(100_000),
     author: z.string().min(1).max(200).optional(),
+  }),
+  // What the sender's own review of the task's deliverable decided. It decides the review here as its
+  // page would (decide_review), so the reviewer's name and the note are typed into the task's session
+  // like any decision: a sender should build them from its own fixed words, not from text its users type.
+  z.object({
+    ...envelope,
+    type: z.literal("review.outcome"),
+    task: externalId,
+    outcome: z.enum(["approved", "rejected"]),
+    // The review's id, as webhooks give it (review.id). Left out: the task's current deliverable.
+    review: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+    reviewer: plainLine(60).optional(),
+    note: plainLine(500).optional(),
   }),
 ]);
 

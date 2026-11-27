@@ -107,3 +107,19 @@ test("a row carries what the table shows and nothing else", () => {
   assert.equal(open.decided_by, null);
   assert.equal(open.project, null);
 });
+
+test("an undecided review on a finished or cancelled task is not waiting: it shows as closed, under All only", () => {
+  const listed = (status, taskStatus) => ({
+    token: `t-${status}-${taskStatus}`, title: "Cut", status, decided_by: null, decided_at: null, content_type: "video/mp4",
+    object_key: "a/cut.mp4", created_at: "2026-11-10T09:00:00Z", version: 1, tasks: { id: 1, title: "T", project: null, status: taskStatus },
+  });
+  const rows = shapeRows("acme", [
+    listed("open", "in_progress"), listed("open", "done"), listed("open", "cancelled"), listed("approved", "done"), listed("open", undefined),
+  ]);
+  assert.deepEqual(rows.map((r) => r.status), ["open", "closed", "closed", "approved", "open"]);
+  assert.deepEqual(shownRows(rows, "waiting").map((r) => r.status), ["open", "open"]);
+  assert.equal(shownRows(rows, "all").length, 5);
+  // In the queue they sit with what is decided, after everything that waits.
+  assert.deepEqual(sortRows(rows, null).map((r) => r.status).slice(0, 2), ["open", "open"]);
+  assert.deepEqual(sortRows(rows, { key: "status", dir: 1 }).map((r) => r.status), ["open", "open", "approved", "closed", "closed"]);
+});
